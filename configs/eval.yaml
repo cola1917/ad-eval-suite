@@ -1,0 +1,89 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Evaluation strategy configuration for ad-eval-suite
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Companion dataset config (data paths + category schema definitions)
+dataset_config: configs/dataset.yaml
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Default eval parameters — inherited by every strategy unless overridden
+# ─────────────────────────────────────────────────────────────────────────────
+defaults:
+  matcher: greedy         # greedy | hungarian
+  iou_threshold: 0.5
+  max_frames: 50
+  seed: 42
+  class_aware: true
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Named eval strategies
+#
+# Each strategy picks a category_schema (defined in dataset.yaml) and may
+# override any default parameter above.  Pass --strategy <name> to scripts;
+# when omitted the active_strategy below is used.
+# ─────────────────────────────────────────────────────────────────────────────
+strategies:
+
+  # ── Strategy 1: Raw — 23 original nuScenes classes, no remapping ────────────
+  raw:
+    description: "Eval using all original nuScenes category names (23 classes)"
+    category_schema: raw
+    iou_threshold: 0.5
+    matcher: greedy
+
+  # ── Strategy 2: Standard 10-class detection benchmark ───────────────────────
+  detection_10cls:
+    description: "NuScenes standard detection benchmark — 10 canonical classes"
+    category_schema: detection_10cls
+    iou_threshold: 0.5
+    matcher: greedy
+
+  # ── Strategy 3: L2 Planning — 4 semantic classes ────────────────────────────
+  # vehicle / pedestrian / cyclist / object.
+  # Uses a looser IoU threshold (0.3) appropriate for coarse planning queries,
+  # and Hungarian matching for more stable assignment across the 4 groups.
+  l2_planning:
+    description: >
+      Planning-level eval — 4 semantic classes:
+      vehicle / pedestrian / cyclist / object.
+      Looser IoU threshold suited for planning-quality bounding-box queries.
+    category_schema: l2_planning
+    iou_threshold: 0.3
+    matcher: hungarian
+    class_aware: true
+
+# Strategy applied when no --strategy flag is provided
+active_strategy: detection_10cls
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Perception-specific settings (detection + tracking)
+# ─────────────────────────────────────────────────────────────────────────────
+perception:
+  topn_visualizations: 5
+  topn_per_scenario: 3
+  visualization_dir: outputs/perception/topn
+  distance_buckets:
+    near_max: 15.0   # metres — near  = [0, near_max)
+    far_min:  40.0   # metres — far   = [far_min, ∞)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Planning-specific settings  (most relevant with l2_planning strategy)
+# ─────────────────────────────────────────────────────────────────────────────
+planning:
+  horizon_seconds: 3.0
+  dt: 0.5
+  metrics:
+    - displacement_error
+    - collision_rate
+    - comfort_jerk
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Prediction-specific settings
+# ─────────────────────────────────────────────────────────────────────────────
+prediction:
+  horizon_seconds: 5.0
+  dt: 0.5
+  metrics:
+    - ade
+    - fde
+    - miss_rate
