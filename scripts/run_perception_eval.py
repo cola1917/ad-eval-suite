@@ -12,6 +12,7 @@ try:
 	from eval.perception.detection_eval import evaluate_detection_frames
 	from eval.perception.tracking_eval import evaluate_tracking_frames
 	from generators.detection_generator import DetectionGenerator, DetectionGeneratorConfig
+	from utils.category_remap import build_remapper_from_eval_config
 except ImportError:  # pragma: no cover
 	workspace_root = Path(__file__).resolve().parents[1]
 	if str(workspace_root) not in sys.path:
@@ -20,6 +21,7 @@ except ImportError:  # pragma: no cover
 	from eval.perception.detection_eval import evaluate_detection_frames
 	from eval.perception.tracking_eval import evaluate_tracking_frames
 	from generators.detection_generator import DetectionGenerator, DetectionGeneratorConfig
+	from utils.category_remap import build_remapper_from_eval_config
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
@@ -28,9 +30,19 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 	parser.add_argument("--version", default="v1.0-mini", help="nuScenes version")
 	parser.add_argument("--scene-id", default=None, help="Optional scene name/token")
 	parser.add_argument("--max-frames", type=int, default=10, help="Number of frames to evaluate")
-	parser.add_argument("--matcher", choices=["greedy", "hungarian"], default="hungarian", help="Matcher")
-	parser.add_argument("--det-iou-threshold", type=float, default=0.3, help="Detection IoU threshold")
-	parser.add_argument("--trk-iou-threshold", type=float, default=0.3, help="Tracking IoU threshold")
+	parser.add_argument("--matcher", choices=["greedy", "hungarian"], default=None, help="Matcher (overrides strategy)")
+	parser.add_argument("--det-iou-threshold", type=float, default=None, help="Detection IoU threshold (overrides strategy)")
+	parser.add_argument("--trk-iou-threshold", type=float, default=None, help="Tracking IoU threshold (overrides strategy)")
+	# Strategy selection — reads eval.yaml and applies category remapping + eval params automatically.
+	parser.add_argument(
+		"--eval-config", default="configs/eval.yaml",
+		help="Path to eval.yaml (default: configs/eval.yaml)",
+	)
+	parser.add_argument(
+		"--strategy", default=None,
+		help="Eval strategy name from eval.yaml (raw | detection_10cls | l2_planning). "
+		     "Omit to use active_strategy from eval.yaml.",
+	)
 
 	# Synthetic prediction controls.
 	parser.add_argument("--seed", type=int, default=42, help="Generator random seed")
@@ -45,6 +57,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 	parser.add_argument("--topn-per-scenario", type=int, default=1, help="Top-N per scenario")
 	parser.add_argument("--output-dir", default="outputs/perception", help="Root output directory")
 	parser.add_argument("--run-name", default=None, help="Optional run name for output folder")
+
+	# ODD / occlusion bucketing options.
+	parser.add_argument("--occlusion-bucketing", action="store_true", default=False,
+	                    help="Add occlusion-level (ODD) breakdown to report")
+	parser.add_argument("--combined-bucketing", action="store_true", default=False,
+	                    help="Add combined occlusion × distance breakdown to report")
 	return parser
 
 
@@ -83,6 +101,8 @@ def _build_markdown_report(result: Dict[str, Any], config: Dict[str, Any]) -> st
 		"| --- | --- |",
 		f"| Dataset | {config['dataset']} |",
 		f"| Scene | {config['scene']} |",
+		f"| Strategy | {config.get('strategy', '—')} |",
+		f"| Category schema | {config.get('category_schema', 'raw')} |",
 		f"| Frames | {detection['num_frames']} |",
 		f"| Matcher | {detection['matcher']} |",
 		f"| Detection IoU threshold | {detection['iou_threshold']} |",
@@ -200,6 +220,38 @@ def _build_markdown_report(result: Dict[str, Any], config: Dict[str, Any]) -> st
 			f"{trk_mota:.4f} | {trk_motp:.4f} | {trk_tp} | {trk_fp} | {trk_fn} | {trk_idsw} |"
 		)
 
+	# --- Occlusion (ODD) Buckets -----------------------------------------------
+	if detection.get("occlusion_buckets"):
+		occ_labels = detection.get("occlusion_bucket_labels", {})
+		lines.append("")
+		lines.append("## Detection Occlusion (ODD) Buckets")
+		lines.append("| Bucket | Precision | Recall | TP | FP | FN |")
+		lines.append("| --- | ---: | ---: | ---: | ---: | ---: |")
+		for bucket_name, metrics in detection["occlusion_buckets"].items():
+			label = occ_labels.get(bucket_name, bucket_name)
+			lines.append(
+				f"| {label} | {metrics['precision']:.4f} | {metrics['recall']:.4f} | "
+				f"{metrics['tp']} | {metrics['fp']} | {metrics['fn']} |"
+			)
+
+	# --- Combined Occlusion × Distance Buckets ---------------------------------
+	if detection.get("occlusion_distance_buckets"):
+		combined_labels = detection.get("combined_bucket_labels", {})
+		occ_labels = combined_labels.get("occlusion", {})
+		dist_labels = combined_labels.get("distance", {})
+		lines.append("")
+		lines.append("## Detection Combined Occlusion × Distance Buckets")
+		lines.append("| Occlusion | Distance | Precision | Recall | TP | FP | FN |")
+		lines.append("| --- | --- | ---: | ---: | ---: | ---: | ---: |")
+		for occ_level, dist_buckets in detection["occlusion_distance_buckets"].items():
+			occ_label = occ_labels.get(occ_level, occ_level)
+			for dist_name, metrics in dist_buckets.items():
+				dist_label = dist_labels.get(dist_name, dist_name)
+				lines.append(
+					f"| {occ_label} | {dist_label} | {metrics['precision']:.4f} | {metrics['recall']:.4f} | "
+					f"{metrics['tp']} | {metrics['fp']} | {metrics['fn']} |"
+				)
+
 	lines.append("")
 	lines.append("## Notes")
 	lines.append("- Detection and tracking are evaluated from the same generated prediction stream.")
@@ -226,15 +278,59 @@ def _to_json_compatible(value: Any) -> Any:
 	return value
 
 
+def _load_strategy_params(eval_config: str, strategy: str | None) -> Dict[str, Any]:
+	"""Read eval.yaml and return the resolved strategy parameters."""
+	try:
+		import yaml
+	except ImportError:
+		return {}
+	config_path = Path(eval_config)
+	if not config_path.exists():
+		return {}
+	with config_path.open(encoding="utf-8") as fh:
+		eval_cfg = yaml.safe_load(fh) or {}
+	resolved_strategy = strategy or eval_cfg.get("active_strategy", "raw")
+	strategies = eval_cfg.get("strategies", {})
+	if resolved_strategy not in strategies:
+		print(f"[run] warning: strategy {resolved_strategy!r} not found in {eval_config}, ignoring")
+		return {}
+	params = dict(eval_cfg.get("defaults", {}))
+	params.update(strategies[resolved_strategy])
+	params["strategy_name"] = resolved_strategy
+	return params
+
+
 def main() -> int:
 	args = _build_arg_parser().parse_args()
 	paths = _build_run_paths(args.output_dir, args.run_name)
+
+	# ── Load strategy config from eval.yaml ──────────────────────────────────
+	strategy_params = _load_strategy_params(args.eval_config, args.strategy)
+	strategy_name = strategy_params.get("strategy_name", "(none)")
+
+	# CLI args override strategy when explicitly provided
+	resolved_matcher = args.matcher or strategy_params.get("matcher", "hungarian")
+	resolved_det_iou = args.det_iou_threshold or strategy_params.get("iou_threshold", 0.3)
+	resolved_trk_iou = args.trk_iou_threshold or strategy_params.get("iou_threshold", 0.3)
+
+	# ── Build category remapper from the chosen strategy ─────────────────────
+	remapper = None
+	if Path(args.eval_config).exists():
+		try:
+			remapper = build_remapper_from_eval_config(
+				args.eval_config,
+				strategy=args.strategy,
+			)
+			print(f"[run] strategy={strategy_name!r}  schema={strategy_params.get('category_schema', 'raw')}  "
+			      f"target_classes={remapper.target_classes or '(raw)'}")
+		except Exception as exc:
+			print(f"[run] warning: could not build remapper — {exc}")
 
 	loader = NuScenesLoader(data_root=args.data_root, version=args.version, verbose=False)
 	loader.load()
 	scene_id = args.scene_id or loader.get_scene_ids()[0]
 
-	frame_records = list(loader.iter_frame_records(scene_id=scene_id, max_frames=args.max_frames))
+	raw_frame_records = list(loader.iter_frame_records(scene_id=scene_id, max_frames=args.max_frames))
 
 	generator_config = DetectionGeneratorConfig(
 		translation_noise_std=args.translation_noise_std,
@@ -244,22 +340,32 @@ def main() -> int:
 		fp_rate=args.fp_rate,
 	)
 	generator = DetectionGenerator(config=generator_config, seed=args.seed)
-	prediction_records = [generator.generate_frame_predictions(frame_record) for frame_record in frame_records]
+	raw_prediction_records = [generator.generate_frame_predictions(f) for f in raw_frame_records]
+
+	# ── Apply category remapping (no-op when schema is "raw") ──────────────────
+	if remapper is not None:
+		frame_records = list(remapper.apply_to_frames(raw_frame_records))
+		prediction_records = list(remapper.apply_to_predictions(raw_prediction_records))
+	else:
+		frame_records = raw_frame_records
+		prediction_records = raw_prediction_records
 
 	result = evaluate_detection_frames(
 		frame_records=frame_records,
 		prediction_records=prediction_records,
-		iou_threshold=args.det_iou_threshold,
-		matcher=args.matcher,
+		iou_threshold=resolved_det_iou,
+		matcher=resolved_matcher,
 		topn_visualizations=args.topn,
 		topn_per_scenario=args.topn_per_scenario,
 		visualization_dir=str(paths["viz_dir"]),
+		use_occlusion_bucketing=args.occlusion_bucketing,
+		use_combined_bucketing=args.combined_bucketing,
 	)
 	tracking_result = evaluate_tracking_frames(
 		frame_records=frame_records,
 		prediction_records=prediction_records,
-		iou_threshold=args.trk_iou_threshold,
-		matcher=args.matcher,
+		iou_threshold=resolved_trk_iou,
+		matcher=resolved_matcher,
 	)
 
 	full_result = {
@@ -270,9 +376,11 @@ def main() -> int:
 		"dataset": args.version,
 		"scene": scene_id,
 		"max_frames": args.max_frames,
-		"matcher": args.matcher,
-		"det_iou_threshold": args.det_iou_threshold,
-		"trk_iou_threshold": args.trk_iou_threshold,
+		"strategy": strategy_name,
+		"category_schema": strategy_params.get("category_schema", "raw"),
+		"matcher": resolved_matcher,
+		"det_iou_threshold": resolved_det_iou,
+		"trk_iou_threshold": resolved_trk_iou,
 		"seed": args.seed,
 		"generator": {
 			"translation_noise_std": args.translation_noise_std,
@@ -287,7 +395,13 @@ def main() -> int:
 	paths["report_json"].write_text(json.dumps(json_safe_result, indent=2), encoding="utf-8")
 	markdown = _build_markdown_report(
 		result=full_result,
-		config={"dataset": args.version, "scene": scene_id, "seed": args.seed},
+		config={
+			"dataset": args.version,
+			"scene": scene_id,
+			"seed": args.seed,
+			"strategy": strategy_name,
+			"category_schema": strategy_params.get("category_schema", "raw"),
+		},
 	)
 	paths["report_md"].write_text(markdown, encoding="utf-8")
 

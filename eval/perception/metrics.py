@@ -8,6 +8,7 @@ try:
 	from matching.iou_matching import bev_iou
 	from metrics.precision_recall import summarize_detection_frame
 	from utils.distance_bucket import DEFAULT_BUCKET_BOUNDARIES, assign_distance_bucket
+	from utils.occlusion_bucket import assign_occlusion_bucket, VISIBILITY_LEVELS
 except ImportError:  # pragma: no cover
 	workspace_root = Path(__file__).resolve().parents[2]
 	if str(workspace_root) not in sys.path:
@@ -15,6 +16,7 @@ except ImportError:  # pragma: no cover
 	from matching.iou_matching import bev_iou
 	from metrics.precision_recall import summarize_detection_frame
 	from utils.distance_bucket import DEFAULT_BUCKET_BOUNDARIES, assign_distance_bucket
+	from utils.occlusion_bucket import assign_occlusion_bucket, VISIBILITY_LEVELS
 
 
 MatcherFn = Callable[..., Dict[str, Any]]
@@ -114,6 +116,86 @@ def compute_distance_bucket_metrics(
 
 	return results
 
+
+def compute_occlusion_bucket_metrics(
+	gt_boxes: Sequence[Dict[str, Any]],
+	pred_boxes: Sequence[Dict[str, Any]],
+	matcher_fn: MatcherFn,
+	iou_threshold: float,
+	class_aware: bool = True,
+	visibility_mapping: Dict[str, str] = VISIBILITY_LEVELS,
+) -> Dict[str, Dict[str, Any]]:
+	"""Compute metrics bucketed by occlusion level."""
+	bucket_names = ("fully_visible", "mostly_visible", "partially_occluded", "mostly_occluded", "unknown")
+	results: Dict[str, Dict[str, Any]] = {}
+
+	for bucket_name in bucket_names:
+		bucket_gt = [
+			box
+			for box in gt_boxes
+			if assign_occlusion_bucket(box, visibility_mapping) == bucket_name
+		]
+		bucket_pred = [
+			box
+			for box in pred_boxes
+			if assign_occlusion_bucket(box, visibility_mapping) == bucket_name
+		]
+
+		summary = summarize_detection_frame(
+			gt_boxes=bucket_gt,
+			pred_boxes=bucket_pred,
+			iou_threshold=iou_threshold,
+			class_aware=class_aware,
+			matcher_fn=matcher_fn,
+		)
+		results[bucket_name] = summary
+
+	return results
+
+
+def compute_occlusion_distance_bucket_metrics(
+	gt_boxes: Sequence[Dict[str, Any]],
+	pred_boxes: Sequence[Dict[str, Any]],
+	matcher_fn: MatcherFn,
+	iou_threshold: float,
+	class_aware: bool = True,
+	distance_boundaries: Tuple[float, float] = DEFAULT_BUCKET_BOUNDARIES,
+	visibility_mapping: Dict[str, str] = VISIBILITY_LEVELS,
+) -> Dict[str, Dict[str, Dict[str, Any]]]:
+	"""
+	Compute metrics bucketed by both occlusion level and distance.
+	Returns nested dict: {occlusion_level: {distance_level: metrics}}
+	"""
+	occlusion_names = ("fully_visible", "mostly_visible", "partially_occluded", "mostly_occluded", "unknown")
+	distance_names = ("near", "medium", "far")
+	results: Dict[str, Dict[str, Dict[str, Any]]] = {}
+
+	for occ_name in occlusion_names:
+		results[occ_name] = {}
+		for dist_name in distance_names:
+			bucket_gt = [
+				box
+				for box in gt_boxes
+				if assign_occlusion_bucket(box, visibility_mapping) == occ_name
+				and assign_distance_bucket(float(box.get("distance_to_ego", 0.0)), distance_boundaries) == dist_name
+			]
+			bucket_pred = [
+				box
+				for box in pred_boxes
+				if assign_occlusion_bucket(box, visibility_mapping) == occ_name
+				and assign_distance_bucket(float(box.get("distance_to_ego", 0.0)), distance_boundaries) == dist_name
+			]
+
+			summary = summarize_detection_frame(
+				gt_boxes=bucket_gt,
+				pred_boxes=bucket_pred,
+				iou_threshold=iou_threshold,
+				class_aware=class_aware,
+				matcher_fn=matcher_fn,
+			)
+			results[occ_name][dist_name] = summary
+
+	return results
 
 if __name__ == "__main__":
 	gt = [
