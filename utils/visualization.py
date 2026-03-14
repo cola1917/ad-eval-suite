@@ -6,7 +6,7 @@ from typing import Any, Dict, Iterable, List, Sequence, Tuple
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 
-from matching.iou_matching import box_to_bev_corners
+from utils.geometry import box_to_bev_corners
 
 
 def save_detection_bev_plot(

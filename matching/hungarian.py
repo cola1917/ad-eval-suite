@@ -7,11 +7,10 @@ from scipy.optimize import linear_sum_assignment
 
 try:
 	from .iou_matching import bev_iou, center_distance
+	from .types import MatchResult
 except ImportError:  # pragma: no cover
 	from iou_matching import bev_iou, center_distance
-
-
-MatchResult = Dict[str, Any]
+	from matching.types import MatchResult
 
 
 def hungarian_match_detections(

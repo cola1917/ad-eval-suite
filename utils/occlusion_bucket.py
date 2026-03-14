@@ -63,15 +63,7 @@ def bucketize_boxes_by_distance_and_occlusion(
 	Bucketize boxes by both distance and occlusion level.
 	Returns nested dict: {occlusion_level: {distance_level: [boxes]}}
 	"""
-	try:
-		from distance_bucket import assign_distance_bucket
-	except ImportError:
-		import sys
-		from pathlib import Path
-		workspace_root = Path(__file__).resolve().parents[1]
-		if str(workspace_root) not in sys.path:
-			sys.path.insert(0, str(workspace_root))
-		from distance_bucket import assign_distance_bucket
+	from utils.distance_bucket import assign_distance_bucket
 	
 	occlusion_buckets = {
 		"fully_visible": {},

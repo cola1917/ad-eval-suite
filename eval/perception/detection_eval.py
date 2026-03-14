@@ -5,11 +5,12 @@ import json
 import sys
 from functools import partial
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Sequence, Tuple
 
 try:
 	from datasets.nuscenes_loader import NuScenesLoader
-	from eval.perception.metrics import (
+	from eval.perception._common import MatcherFn, _infer_scenario_bucket, _resolve_matcher
+	from eval.perception.bucket_metrics import (
 		aggregate_fp_breakdowns,
 		compute_distance_bucket_metrics,
 		compute_fp_breakdown,
@@ -17,8 +18,6 @@ try:
 		compute_occlusion_distance_bucket_metrics,
 	)
 	from generators.detection_generator import DetectionGenerator
-	from matching.greedy_match import greedy_match_detections
-	from matching.hungarian import hungarian_match_detections
 	from metrics.ap_map import compute_map
 	from metrics.precision_recall import aggregate_frame_summaries, summarize_by_class_from_frame_matches, summarize_detection_frame
 	from utils.distance_bucket import DEFAULT_BUCKET_BOUNDARIES, bucket_label_with_ranges
@@ -29,7 +28,8 @@ except ImportError:  # pragma: no cover
 	if str(workspace_root) not in sys.path:
 		sys.path.insert(0, str(workspace_root))
 	from datasets.nuscenes_loader import NuScenesLoader
-	from eval.perception.metrics import (
+	from eval.perception._common import MatcherFn, _infer_scenario_bucket, _resolve_matcher
+	from eval.perception.bucket_metrics import (
 		aggregate_fp_breakdowns,
 		compute_distance_bucket_metrics,
 		compute_fp_breakdown,
@@ -37,27 +37,11 @@ except ImportError:  # pragma: no cover
 		compute_occlusion_distance_bucket_metrics,
 	)
 	from generators.detection_generator import DetectionGenerator
-	from matching.greedy_match import greedy_match_detections
-	from matching.hungarian import hungarian_match_detections
 	from metrics.ap_map import compute_map
 	from metrics.precision_recall import aggregate_frame_summaries, summarize_by_class_from_frame_matches, summarize_detection_frame
 	from utils.distance_bucket import DEFAULT_BUCKET_BOUNDARIES, bucket_label_with_ranges
 	from utils.occlusion_bucket import occlusion_bucket_labels, VISIBILITY_LEVELS
 	from utils.visualization import save_detection_bev_plot
-
-
-MatcherFn = Callable[..., Dict[str, Any]]
-
-
-def _resolve_matcher(matcher: str | MatcherFn) -> MatcherFn:
-	if callable(matcher):
-		return matcher
-	matcher_name = matcher.lower()
-	if matcher_name == "greedy":
-		return greedy_match_detections
-	if matcher_name == "hungarian":
-		return hungarian_match_detections
-	raise ValueError(f"Unsupported matcher: {matcher}")
 
 
 def evaluate_detection_frames(
@@ -312,22 +296,6 @@ def evaluate_detection_frames(
 		}
 
 	return result
-
-
-def _infer_scenario_bucket(frame_record: Dict[str, Any]) -> str:
-	description = str(frame_record.get("scene_description", "")).lower()
-	location = str(frame_record.get("location", "")).lower()
-	text = f"{description} {location}"
-
-	if any(token in text for token in ("rain", "wet", "fog", "snow")):
-		return "adverse_weather"
-	if "night" in text:
-		return "night"
-	if any(token in text for token in ("highway", "freeway", "expressway")):
-		return "highway"
-	if any(token in location for token in ("singapore", "boston")):
-		return "urban"
-	return "other"
 
 
 def _frame_badness_score(frame_detail: Dict[str, Any]) -> float:

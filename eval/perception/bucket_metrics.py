@@ -1,11 +1,14 @@
+"""Detection bucket metrics: FP breakdown and distance/occlusion sub-group evaluations."""
+
 from __future__ import annotations
 
 from collections import defaultdict
 import sys
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Sequence, Tuple
+from typing import Any, Dict, List, Sequence, Tuple
 
 try:
+	from eval.perception._common import MatcherFn
 	from matching.iou_matching import bev_iou
 	from metrics.precision_recall import summarize_detection_frame
 	from utils.distance_bucket import DEFAULT_BUCKET_BOUNDARIES, assign_distance_bucket
@@ -14,13 +17,11 @@ except ImportError:  # pragma: no cover
 	workspace_root = Path(__file__).resolve().parents[2]
 	if str(workspace_root) not in sys.path:
 		sys.path.insert(0, str(workspace_root))
+	from eval.perception._common import MatcherFn
 	from matching.iou_matching import bev_iou
 	from metrics.precision_recall import summarize_detection_frame
 	from utils.distance_bucket import DEFAULT_BUCKET_BOUNDARIES, assign_distance_bucket
 	from utils.occlusion_bucket import assign_occlusion_bucket, VISIBILITY_LEVELS
-
-
-MatcherFn = Callable[..., Dict[str, Any]]
 
 
 def compute_fp_breakdown(
@@ -214,6 +215,7 @@ def compute_occlusion_distance_bucket_metrics(
 
 	return results
 
+
 if __name__ == "__main__":
 	gt = [
 		{"category_name": "car", "translation": [5.0, 2.0, 0.0], "size": [2.0, 4.0, 1.5], "distance_to_ego": 8.0},
@@ -225,5 +227,5 @@ if __name__ == "__main__":
 	]
 	from matching.greedy_match import greedy_match_detections
 
-	bucket_metrics = compute_distance_bucket_metrics(gt, pred, greedy_match_detections, iou_threshold=0.3)
-	print(f"[self-test] buckets={ {name: metrics['tp'] for name, metrics in bucket_metrics.items()} }")
+	result = compute_distance_bucket_metrics(gt, pred, greedy_match_detections, iou_threshold=0.3)
+	print(f"[self-test] buckets={ {name: metrics['tp'] for name, metrics in result.items()} }")

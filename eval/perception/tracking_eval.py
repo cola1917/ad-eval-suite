@@ -4,7 +4,7 @@ import argparse
 import sys
 from functools import partial
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List
+from typing import Any, Dict, Iterable, List
 
 import numpy as np
 
@@ -15,9 +15,8 @@ except Exception:  # pragma: no cover
 
 try:
 	from datasets.nuscenes_loader import NuScenesLoader
+	from eval.perception._common import MatcherFn, _infer_scenario_bucket, _resolve_matcher
 	from generators.detection_generator import DetectionGenerator
-	from matching.greedy_match import greedy_match_detections
-	from matching.hungarian import hungarian_match_detections
 	from matching.iou_matching import bev_iou, center_distance
 	from metrics.precision_recall import summarize_detection_frame
 except ImportError:  # pragma: no cover
@@ -25,40 +24,10 @@ except ImportError:  # pragma: no cover
 	if str(workspace_root) not in sys.path:
 		sys.path.insert(0, str(workspace_root))
 	from datasets.nuscenes_loader import NuScenesLoader
+	from eval.perception._common import MatcherFn, _infer_scenario_bucket, _resolve_matcher
 	from generators.detection_generator import DetectionGenerator
-	from matching.greedy_match import greedy_match_detections
-	from matching.hungarian import hungarian_match_detections
 	from matching.iou_matching import bev_iou, center_distance
 	from metrics.precision_recall import summarize_detection_frame
-
-
-MatcherFn = Callable[..., Dict[str, Any]]
-
-
-def _resolve_matcher(matcher: str | MatcherFn) -> MatcherFn:
-	if callable(matcher):
-		return matcher
-	matcher_name = matcher.lower()
-	if matcher_name == "greedy":
-		return greedy_match_detections
-	if matcher_name == "hungarian":
-		return hungarian_match_detections
-	raise ValueError(f"Unsupported matcher: {matcher}")
-
-
-def _infer_scenario_bucket(frame_record: Dict[str, Any]) -> str:
-	description = str(frame_record.get("scene_description", "")).lower()
-	location = str(frame_record.get("location", "")).lower()
-	text = f"{description} {location}"
-	if any(token in text for token in ("rain", "wet", "fog", "snow")):
-		return "adverse_weather"
-	if "night" in text:
-		return "night"
-	if any(token in text for token in ("highway", "freeway", "expressway")):
-		return "highway"
-	if any(token in location for token in ("singapore", "boston")):
-		return "urban"
-	return "other"
 
 
 def _safe_track_id(box: Dict[str, Any], fallback: str) -> str:
