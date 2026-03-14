@@ -49,7 +49,7 @@ data/nuscenes-mini/
 └── v1.0-mini/
 ```
 
-Data paths and category schemas are configured in `configs/dataset.yaml`; evaluation parameters (thresholds, matcher, strategy) in `configs/eval.yaml`.
+Datasets and category schemas are configured in `configs/dataset.yaml`; evaluation strategies are configured in `configs/eval.yaml`.
 
 ---
 
@@ -58,24 +58,30 @@ Data paths and category schemas are configured in `configs/dataset.yaml`; evalua
 ### Perception (Detection + Tracking)
 
 ```bash
-# Default strategy (detection_10cls — 10 standard nuScenes classes)
+# Default: active dataset + active strategy from YAML
 python scripts/run_perception_eval.py
 
-# Explicit strategy
-python scripts/run_perception_eval.py --strategy detection_10cls
-python scripts/run_perception_eval.py --strategy l2_planning
-python scripts/run_perception_eval.py --strategy raw
+# Choose dataset and strategy from YAML
+python scripts/run_perception_eval.py --dataset-name nuscenes_mini --strategy detection_10cls
+python scripts/run_perception_eval.py --dataset-name nuscenes_mini --strategy l2_planning
 
-# Common overrides
+# Temporary CLI overrides (without editing YAML)
 python scripts/run_perception_eval.py \
+    --dataset-path /mnt/data/custom_nuscenes \
+    --version v1.0 \
     --strategy detection_10cls \
-    --matcher hungarian \
-    --bev-iou-mode polygon \
+    --scenes first \
     --max-frames 50 \
+    --metrics full \
     --run-name my_run
+
+# Scene selection supports: first | half | full | explicit list
+python scripts/run_perception_eval.py --scenes scene-0061,scene-0103 --max-frames 5
 ```
 
 Detection and tracking are evaluated together and written to `outputs/perception/<run-name>/`.
+
+`--max-frames` is applied per selected scene (`full` means no frame cap).
 
 ### Prediction
 

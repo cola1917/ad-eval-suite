@@ -1,11 +1,24 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# Dataset configuration for ad-eval-suite
+# Dataset registry for ad-eval-suite
 # ─────────────────────────────────────────────────────────────────────────────
-data:
-  root: data/nuscenes-mini
-  version: v1.0-mini
-  split: mini
-  verbose: false
+datasets:
+  nuscenes_mini:
+    root: data/nuscenes-mini
+    version: v1.0-mini
+    maps: maps
+    samples: samples
+    sweeps: sweeps
+    category_schema: detection_10cls
+
+  nuscenes_full:
+    root: /mnt/data/nuscenes-full
+    version: v1.0
+    maps: maps
+    samples: samples
+    sweeps: sweeps
+    category_schema: detection_10cls
+
+active_dataset: nuscenes_mini
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Category taxonomy schemas
