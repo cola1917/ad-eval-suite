@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from functools import partial
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List
 
@@ -158,8 +159,11 @@ def evaluate_tracking_frames(
 	iou_threshold: float = 0.5,
 	matcher: str | MatcherFn = "hungarian",
 	class_aware: bool = True,
+	center_distance_threshold: float | None = None,
 ) -> Dict[str, Any]:
 	matcher_fn = _resolve_matcher(matcher)
+	if center_distance_threshold is not None:
+		matcher_fn = partial(matcher_fn, center_distance_threshold=center_distance_threshold)
 	frame_records_list = list(frame_records)
 	prediction_records_list = list(prediction_records)
 	if len(frame_records_list) != len(prediction_records_list):

@@ -4,6 +4,8 @@ from functools import lru_cache
 import math
 from typing import Any, Dict, List, Sequence, Tuple
 
+import numpy as np
+
 try:
 	from shapely.geometry import Polygon
 except Exception:  # pragma: no cover
@@ -11,17 +13,25 @@ except Exception:  # pragma: no cover
 
 
 BoxRecord = Dict[str, Any]
+_BEV_IOU_MODE = "aabb"
+
+
+def set_bev_iou_mode(mode: str) -> None:
+	"""Set BEV IoU mode: 'aabb' (fast) or 'polygon' (yaw-aware, slower)."""
+	global _BEV_IOU_MODE
+	normalized = (mode or "aabb").strip().lower()
+	if normalized not in {"aabb", "polygon"}:
+		raise ValueError(f"Unsupported BEV IoU mode: {mode}")
+	_BEV_IOU_MODE = normalized
 
 
 def bev_iou(box_a: BoxRecord, box_b: BoxRecord) -> float:
 	"""Compute BEV IoU. Uses yaw-aware polygons when Shapely is available."""
 
-	if Polygon is not None:
+	if _BEV_IOU_MODE == "polygon" and Polygon is not None:
 		poly_a = _polygon_from_key(_box_cache_key(box_a))
 		poly_b = _polygon_from_key(_box_cache_key(box_b))
 		if poly_a is None or poly_b is None:
-			return _axis_aligned_bev_iou(box_a, box_b)
-		if not poly_a.is_valid or not poly_b.is_valid:
 			return _axis_aligned_bev_iou(box_a, box_b)
 		intersection = poly_a.intersection(poly_b).area
 		if intersection <= 0.0:
@@ -34,8 +44,43 @@ def bev_iou(box_a: BoxRecord, box_b: BoxRecord) -> float:
 	return _axis_aligned_bev_iou(box_a, box_b)
 
 
-def pairwise_iou_matrix(gt_boxes: Sequence[BoxRecord], pred_boxes: Sequence[BoxRecord]) -> List[List[float]]:
-	return [[bev_iou(gt_box, pred_box) for pred_box in pred_boxes] for gt_box in gt_boxes]
+def pairwise_iou_matrix(gt_boxes: Sequence[BoxRecord], pred_boxes: Sequence[BoxRecord]) -> np.ndarray:
+	if not gt_boxes or not pred_boxes:
+		return np.zeros((len(gt_boxes), len(pred_boxes)), dtype=float)
+
+	if _BEV_IOU_MODE != "aabb":
+		return np.array([[bev_iou(gt_box, pred_box) for pred_box in pred_boxes] for gt_box in gt_boxes], dtype=float)
+
+	gt_bounds = np.array([_bev_bounds(box) for box in gt_boxes], dtype=float)
+	pred_bounds = np.array([_bev_bounds(box) for box in pred_boxes], dtype=float)
+
+	gt_min_x = gt_bounds[:, 0][:, None]
+	gt_min_y = gt_bounds[:, 1][:, None]
+	gt_max_x = gt_bounds[:, 2][:, None]
+	gt_max_y = gt_bounds[:, 3][:, None]
+
+	pred_min_x = pred_bounds[:, 0][None, :]
+	pred_min_y = pred_bounds[:, 1][None, :]
+	pred_max_x = pred_bounds[:, 2][None, :]
+	pred_max_y = pred_bounds[:, 3][None, :]
+
+	inter_min_x = np.maximum(gt_min_x, pred_min_x)
+	inter_min_y = np.maximum(gt_min_y, pred_min_y)
+	inter_max_x = np.minimum(gt_max_x, pred_max_x)
+	inter_max_y = np.minimum(gt_max_y, pred_max_y)
+
+	inter_width = np.maximum(0.0, inter_max_x - inter_min_x)
+	inter_height = np.maximum(0.0, inter_max_y - inter_min_y)
+	intersection = inter_width * inter_height
+
+	gt_area = np.maximum(0.0, gt_max_x - gt_min_x) * np.maximum(0.0, gt_max_y - gt_min_y)
+	pred_area = np.maximum(0.0, pred_max_x - pred_min_x) * np.maximum(0.0, pred_max_y - pred_min_y)
+	union = gt_area + pred_area - intersection
+
+	iou = np.zeros_like(intersection, dtype=float)
+	valid = union > 0.0
+	iou[valid] = intersection[valid] / union[valid]
+	return iou
 
 
 def center_distance(box_a: BoxRecord, box_b: BoxRecord) -> float:
@@ -129,6 +174,10 @@ def _axis_aligned_bev_iou(box_a: BoxRecord, box_b: BoxRecord) -> float:
 
 
 def _bev_bounds(box: BoxRecord) -> Tuple[float, float, float, float]:
+	cached_bounds = box.get("__bev_bounds")
+	if cached_bounds is not None:
+		return cached_bounds
+
 	translation = box.get("translation", [0.0, 0.0, 0.0])
 	size = box.get("size", [0.0, 0.0, 0.0])
 	width = float(size[0]) if len(size) > 0 else 0.0
@@ -137,12 +186,10 @@ def _bev_bounds(box: BoxRecord) -> Tuple[float, float, float, float]:
 	center_y = float(translation[1]) if len(translation) > 1 else 0.0
 	half_width = width / 2.0
 	half_length = length / 2.0
-	return (
-		center_x - half_width,
-		center_y - half_length,
-		center_x + half_width,
-		center_y + half_length,
-	)
+	bounds = (center_x - half_width, center_y - half_length, center_x + half_width, center_y + half_length)
+	# Cache for repeated IoU calls against the same box in matching loops.
+	box["__bev_bounds"] = bounds
+	return bounds
 
 
 if __name__ == "__main__":

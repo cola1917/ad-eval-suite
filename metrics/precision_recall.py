@@ -72,6 +72,46 @@ def aggregate_frame_summaries(frame_summaries: Sequence[MetricSummary]) -> Metri
 	}
 
 
+def summarize_by_class_from_frame_matches(
+	frame_summaries: Sequence[MetricSummary],
+	classes: Sequence[str],
+) -> Dict[str, MetricSummary]:
+	"""Aggregate class-wise TP/FP/FN from already computed frame match results."""
+	counts = {
+		class_name: {"tp": 0, "fp": 0, "fn": 0}
+		for class_name in classes
+	}
+
+	for summary in frame_summaries:
+		match_result = summary.get("match_result", {})
+		for match in match_result.get("matches", []):
+			class_name = str(match.get("gt_box", {}).get("category_name", ""))
+			if class_name in counts:
+				counts[class_name]["tp"] += 1
+		for fp_entry in match_result.get("false_positives", []):
+			class_name = str(fp_entry.get("pred_box", {}).get("category_name", ""))
+			if class_name in counts:
+				counts[class_name]["fp"] += 1
+		for fn_entry in match_result.get("false_negatives", []):
+			class_name = str(fn_entry.get("gt_box", {}).get("category_name", ""))
+			if class_name in counts:
+				counts[class_name]["fn"] += 1
+
+	results: Dict[str, MetricSummary] = {}
+	for class_name in classes:
+		tp = counts[class_name]["tp"]
+		fp = counts[class_name]["fp"]
+		fn = counts[class_name]["fn"]
+		results[class_name] = {
+			"tp": tp,
+			"fp": fp,
+			"fn": fn,
+			**compute_precision_recall_f1(tp, fp, fn),
+			"num_frames": len(frame_summaries),
+		}
+	return results
+
+
 def summarize_by_class(
 	gt_boxes: Sequence[Dict[str, Any]],
 	pred_boxes: Sequence[Dict[str, Any]],

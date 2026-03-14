@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import defaultdict
 import sys
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Sequence, Tuple
@@ -37,18 +38,34 @@ def compute_fp_breakdown(
 	}
 
 	matched_gt_indices = {entry["gt_index"] for entry in match_result.get("matches", [])}
+	gt_by_class: Dict[str, List[Tuple[int, Dict[str, Any]]]] = defaultdict(list)
+	for gt_index, gt_box in enumerate(gt_boxes):
+		gt_by_class[str(gt_box.get("category_name", ""))].append((gt_index, gt_box))
+	all_classes = list(gt_by_class.keys())
+
 	for fp_entry in match_result.get("false_positives", []):
 		pred_box = fp_entry["pred_box"]
+		pred_class = str(pred_box.get("category_name", ""))
 		best_iou = 0.0
 		best_gt_index = -1
 		best_class_match = False
 
-		for gt_index, gt_box in enumerate(gt_boxes):
+		for gt_index, gt_box in gt_by_class.get(pred_class, []):
 			iou_score = bev_iou(gt_box, pred_box)
 			if iou_score > best_iou:
 				best_iou = iou_score
 				best_gt_index = gt_index
-				best_class_match = pred_box.get("category_name") == gt_box.get("category_name")
+				best_class_match = True
+
+		for class_name in all_classes:
+			if class_name == pred_class:
+				continue
+			for gt_index, gt_box in gt_by_class[class_name]:
+				iou_score = bev_iou(gt_box, pred_box)
+				if iou_score > best_iou:
+					best_iou = iou_score
+					best_gt_index = gt_index
+					best_class_match = False
 
 		if best_gt_index >= 0 and best_iou >= iou_threshold:
 			if best_class_match:

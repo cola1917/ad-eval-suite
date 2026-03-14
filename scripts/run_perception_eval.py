@@ -12,6 +12,7 @@ try:
 	from eval.perception.detection_eval import evaluate_detection_frames
 	from eval.perception.tracking_eval import evaluate_tracking_frames
 	from generators.detection_generator import DetectionGenerator, DetectionGeneratorConfig
+	from matching.iou_matching import set_bev_iou_mode
 	from utils.category_remap import build_remapper_from_eval_config
 except ImportError:  # pragma: no cover
 	workspace_root = Path(__file__).resolve().parents[1]
@@ -21,6 +22,7 @@ except ImportError:  # pragma: no cover
 	from eval.perception.detection_eval import evaluate_detection_frames
 	from eval.perception.tracking_eval import evaluate_tracking_frames
 	from generators.detection_generator import DetectionGenerator, DetectionGeneratorConfig
+	from matching.iou_matching import set_bev_iou_mode
 	from utils.category_remap import build_remapper_from_eval_config
 
 
@@ -29,10 +31,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 	parser.add_argument("--data-root", default="data/nuscenes-mini", help="Path to nuScenes data root")
 	parser.add_argument("--version", default="v1.0-mini", help="nuScenes version")
 	parser.add_argument("--scene-id", default=None, help="Optional scene name/token")
-	parser.add_argument("--max-frames", type=int, default=10, help="Number of frames to evaluate")
+	# No --scene-id means all scenes in the dataset are evaluated.
+	parser.add_argument("--max-frames", type=int, default=None,
+	                    help="Max frames to evaluate (0 = all frames across all/selected scenes)")
 	parser.add_argument("--matcher", choices=["greedy", "hungarian"], default=None, help="Matcher (overrides strategy)")
 	parser.add_argument("--det-iou-threshold", type=float, default=None, help="Detection IoU threshold (overrides strategy)")
 	parser.add_argument("--trk-iou-threshold", type=float, default=None, help="Tracking IoU threshold (overrides strategy)")
+	parser.add_argument(
+		"--bev-iou-mode", choices=["aabb", "polygon"], default=None,
+		help="BEV IoU mode (overrides strategy): aabb (fast) or polygon (yaw-aware, slower)",
+	)
 	# Strategy selection — reads eval.yaml and applies category remapping + eval params automatically.
 	parser.add_argument(
 		"--eval-config", default="configs/eval.yaml",
@@ -58,11 +66,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 	parser.add_argument("--output-dir", default="outputs/perception", help="Root output directory")
 	parser.add_argument("--run-name", default=None, help="Optional run name for output folder")
 
-	# ODD / occlusion bucketing options.
-	parser.add_argument("--occlusion-bucketing", action="store_true", default=False,
-	                    help="Add occlusion-level (ODD) breakdown to report")
-	parser.add_argument("--combined-bucketing", action="store_true", default=False,
-	                    help="Add combined occlusion × distance breakdown to report")
+	parser.add_argument(
+		"--center-distance-threshold", type=float, default=None,
+		help="If set, a GT-pred pair only matches when center distance (m) is within this threshold (in addition to IoU).",
+	)
+
 	return parser
 
 
@@ -91,7 +99,7 @@ def _build_markdown_report(result: Dict[str, Any], config: Dict[str, Any]) -> st
 	det_overall = detection["overall"]
 	trk_overall = tracking["overall"]
 	map_value = detection["map"]["map"]
-	bucket_labels = detection["distance_bucket_labels"]
+	bucketing_status = detection.get("bucketing_status", {})
 
 	lines = [
 		"# Perception Evaluation Report",
@@ -107,6 +115,11 @@ def _build_markdown_report(result: Dict[str, Any], config: Dict[str, Any]) -> st
 		f"| Matcher | {detection['matcher']} |",
 		f"| Detection IoU threshold | {detection['iou_threshold']} |",
 		f"| Tracking IoU threshold | {tracking['iou_threshold']} |",
+		f"| BEV IoU mode | {config.get('bev_iou_mode', 'aabb')} |",
+		*(
+			[f"| Center distance threshold (m) | {config['center_distance_threshold']} |"]
+			if config.get("center_distance_threshold") is not None else []
+		),
 		f"| Seed | {config['seed']} |",
 		"",
 		"## Detection vs Tracking Summary",
@@ -131,15 +144,21 @@ def _build_markdown_report(result: Dict[str, Any], config: Dict[str, Any]) -> st
 		f"| FP breakdown | {detection['fp_breakdown']} |",
 		"",
 		"## Detection Distance Buckets",
-		"| Bucket | Precision | Recall | TP | FP | FN |",
-		"| --- | ---: | ---: | ---: | ---: | ---: |",
 	]
-
-	for bucket_name, metrics in detection["distance_buckets"].items():
-		lines.append(
-			f"| {bucket_labels[bucket_name]} | {metrics['precision']:.4f} | {metrics['recall']:.4f} | "
-			f"{metrics['tp']} | {metrics['fp']} | {metrics['fn']} |"
-		)
+	if detection.get("distance_buckets") and detection.get("distance_bucket_labels"):
+		bucket_labels = detection["distance_bucket_labels"]
+		lines.extend([
+			"| Bucket | Precision | Recall | TP | FP | FN |",
+			"| --- | ---: | ---: | ---: | ---: | ---: |",
+		])
+		for bucket_name, metrics in detection["distance_buckets"].items():
+			lines.append(
+				f"| {bucket_labels[bucket_name]} | {metrics['precision']:.4f} | {metrics['recall']:.4f} | "
+				f"{metrics['tp']} | {metrics['fp']} | {metrics['fn']} |"
+			)
+	else:
+		reason = bucketing_status.get("distance", {}).get("reason", "no bucket data")
+		lines.append(f"- Skipped: {reason}")
 
 	lines.append("")
 	lines.append("## Detection Per Scenario")
@@ -233,6 +252,11 @@ def _build_markdown_report(result: Dict[str, Any], config: Dict[str, Any]) -> st
 				f"| {label} | {metrics['precision']:.4f} | {metrics['recall']:.4f} | "
 				f"{metrics['tp']} | {metrics['fp']} | {metrics['fn']} |"
 			)
+	else:
+		lines.append("")
+		lines.append("## Detection Occlusion (ODD) Buckets")
+		reason = bucketing_status.get("occlusion", {}).get("reason", "no bucket data")
+		lines.append(f"- Skipped: {reason}")
 
 	# --- Combined Occlusion × Distance Buckets ---------------------------------
 	if detection.get("occlusion_distance_buckets"):
@@ -251,6 +275,11 @@ def _build_markdown_report(result: Dict[str, Any], config: Dict[str, Any]) -> st
 					f"| {occ_label} | {dist_label} | {metrics['precision']:.4f} | {metrics['recall']:.4f} | "
 					f"{metrics['tp']} | {metrics['fp']} | {metrics['fn']} |"
 				)
+	else:
+		lines.append("")
+		lines.append("## Detection Combined Occlusion × Distance Buckets")
+		reason = bucketing_status.get("combined", {}).get("reason", "no bucket data")
+		lines.append(f"- Skipped: {reason}")
 
 	lines.append("")
 	lines.append("## Notes")
@@ -312,6 +341,17 @@ def main() -> int:
 	resolved_matcher = args.matcher or strategy_params.get("matcher", "hungarian")
 	resolved_det_iou = args.det_iou_threshold or strategy_params.get("iou_threshold", 0.3)
 	resolved_trk_iou = args.trk_iou_threshold or strategy_params.get("iou_threshold", 0.3)
+	resolved_bev_iou_mode = args.bev_iou_mode or strategy_params.get("bev_iou_mode", "aabb")
+	resolved_center_distance = (
+		args.center_distance_threshold
+		if args.center_distance_threshold is not None
+		else strategy_params.get("center_distance_threshold")
+	)
+	resolved_max_frames = (
+		args.max_frames
+		if args.max_frames is not None
+		else strategy_params.get("max_frames")
+	)
 
 	# ── Build category remapper from the chosen strategy ─────────────────────
 	remapper = None
@@ -327,10 +367,14 @@ def main() -> int:
 			print(f"[run] warning: could not build remapper — {exc}")
 
 	loader = NuScenesLoader(data_root=args.data_root, version=args.version, verbose=False)
+	set_bev_iou_mode(resolved_bev_iou_mode)
 	loader.load()
-	scene_id = args.scene_id or loader.get_scene_ids()[0]
+	scene_id = args.scene_id  # None → evaluate all scenes
 
-	raw_frame_records = list(loader.iter_frame_records(scene_id=scene_id, max_frames=args.max_frames))
+	max_frames = resolved_max_frames if (resolved_max_frames is not None and resolved_max_frames > 0) else None
+	raw_frame_records = list(loader.iter_frame_records(scene_id=scene_id, max_frames=max_frames))
+	covered_scenes = sorted({str(frame.get("scene_name", "unknown_scene")) for frame in raw_frame_records})
+	print(f"[run] loaded frames={len(raw_frame_records)}  scenes={len(covered_scenes)}  sample={covered_scenes[:3]}")
 
 	generator_config = DetectionGeneratorConfig(
 		translation_noise_std=args.translation_noise_std,
@@ -358,14 +402,14 @@ def main() -> int:
 		topn_visualizations=args.topn,
 		topn_per_scenario=args.topn_per_scenario,
 		visualization_dir=str(paths["viz_dir"]),
-		use_occlusion_bucketing=args.occlusion_bucketing,
-		use_combined_bucketing=args.combined_bucketing,
+		center_distance_threshold=resolved_center_distance,
 	)
 	tracking_result = evaluate_tracking_frames(
 		frame_records=frame_records,
 		prediction_records=prediction_records,
 		iou_threshold=resolved_trk_iou,
 		matcher=resolved_matcher,
+		center_distance_threshold=resolved_center_distance,
 	)
 
 	full_result = {
@@ -374,13 +418,15 @@ def main() -> int:
 	}
 	full_result["config"] = {
 		"dataset": args.version,
-		"scene": scene_id,
-		"max_frames": args.max_frames,
+		"scene": scene_id or "all",
+		"max_frames": max_frames,
 		"strategy": strategy_name,
 		"category_schema": strategy_params.get("category_schema", "raw"),
 		"matcher": resolved_matcher,
 		"det_iou_threshold": resolved_det_iou,
 		"trk_iou_threshold": resolved_trk_iou,
+		"bev_iou_mode": resolved_bev_iou_mode,
+		"center_distance_threshold": resolved_center_distance,
 		"seed": args.seed,
 		"generator": {
 			"translation_noise_std": args.translation_noise_std,
@@ -397,7 +443,9 @@ def main() -> int:
 		result=full_result,
 		config={
 			"dataset": args.version,
-			"scene": scene_id,
+			"scene": scene_id or "all",
+			"bev_iou_mode": resolved_bev_iou_mode,
+			"center_distance_threshold": resolved_center_distance,
 			"seed": args.seed,
 			"strategy": strategy_name,
 			"category_schema": strategy_params.get("category_schema", "raw"),
@@ -407,7 +455,7 @@ def main() -> int:
 
 	det_overall = result["overall"]
 	trk_overall = tracking_result["overall"]
-	print(f"[run] scene={scene_id} frames={result['num_frames']} matcher={result['matcher']}")
+	print(f"[run] scene={scene_id or 'all'} frames={result['num_frames']} matcher={result['matcher']}")
 	print(
 		"[run][detection] "
 		f"P={det_overall['precision']:.4f} R={det_overall['recall']:.4f} F1={det_overall['f1']:.4f} "

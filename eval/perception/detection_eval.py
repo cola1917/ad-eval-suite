@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from functools import partial
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Sequence, Tuple
 
@@ -19,7 +20,7 @@ try:
 	from matching.greedy_match import greedy_match_detections
 	from matching.hungarian import hungarian_match_detections
 	from metrics.ap_map import compute_map
-	from metrics.precision_recall import aggregate_frame_summaries, summarize_by_class, summarize_detection_frame
+	from metrics.precision_recall import aggregate_frame_summaries, summarize_by_class_from_frame_matches, summarize_detection_frame
 	from utils.distance_bucket import DEFAULT_BUCKET_BOUNDARIES, bucket_label_with_ranges
 	from utils.occlusion_bucket import occlusion_bucket_labels, VISIBILITY_LEVELS
 	from utils.visualization import save_detection_bev_plot
@@ -39,7 +40,7 @@ except ImportError:  # pragma: no cover
 	from matching.greedy_match import greedy_match_detections
 	from matching.hungarian import hungarian_match_detections
 	from metrics.ap_map import compute_map
-	from metrics.precision_recall import aggregate_frame_summaries, summarize_by_class, summarize_detection_frame
+	from metrics.precision_recall import aggregate_frame_summaries, summarize_by_class_from_frame_matches, summarize_detection_frame
 	from utils.distance_bucket import DEFAULT_BUCKET_BOUNDARIES, bucket_label_with_ranges
 	from utils.occlusion_bucket import occlusion_bucket_labels, VISIBILITY_LEVELS
 	from utils.visualization import save_detection_bev_plot
@@ -69,16 +70,32 @@ def evaluate_detection_frames(
 	topn_visualizations: int = 0,
 	topn_per_scenario: int = 0,
 	visualization_dir: str | None = None,
-	use_occlusion_bucketing: bool = False,
-	use_combined_bucketing: bool = False,
+	center_distance_threshold: float | None = None,
 ) -> Dict[str, Any]:
 	matcher_fn = _resolve_matcher(matcher)
+	if center_distance_threshold is not None:
+		matcher_fn = partial(matcher_fn, center_distance_threshold=center_distance_threshold)
 	frame_records_list = list(frame_records)
 	prediction_records_list = list(prediction_records)
 	if len(frame_records_list) != len(prediction_records_list):
 		raise ValueError(
 			f"Mismatched frame/prediction counts: {len(frame_records_list)} vs {len(prediction_records_list)}"
 		)
+
+	input_gt_boxes = [box for frame in frame_records_list for box in frame.get("gt_boxes", [])]
+	input_pred_boxes = [box for frame in prediction_records_list for box in frame.get("pred_boxes", [])]
+	has_distance_data = (
+		any(box.get("distance_to_ego") is not None for box in input_gt_boxes)
+		and any(box.get("distance_to_ego") is not None for box in input_pred_boxes)
+	)
+	has_visibility_data = (
+		any(box.get("visibility_token") is not None for box in input_gt_boxes)
+		and any(box.get("visibility_token") is not None for box in input_pred_boxes)
+	)
+
+	distance_bucketing_enabled = has_distance_data
+	occlusion_bucketing_enabled = has_visibility_data
+	combined_bucketing_enabled = has_visibility_data and has_distance_data
 
 	frame_summaries: List[Dict[str, Any]] = []
 	frame_fp_breakdowns: List[Dict[str, int]] = []
@@ -89,10 +106,10 @@ def evaluate_detection_frames(
 	scene_accumulator: Dict[str, List[Dict[str, Any]]] = {}
 	scenario_accumulator: Dict[str, List[Dict[str, Any]]] = {}
 
-	# Initialize occlusion bucket accumulators if needed
+	# Initialize bucket accumulators only when the required fields exist in data.
 	occlusion_bucket_accumulator: Dict[str, List[Dict[str, Any]]] = {}
 	occlusion_distance_bucket_accumulator: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
-	if use_occlusion_bucketing:
+	if occlusion_bucketing_enabled:
 		occlusion_bucket_accumulator = {
 			"fully_visible": [],
 			"mostly_visible": [],
@@ -100,7 +117,7 @@ def evaluate_detection_frames(
 			"mostly_occluded": [],
 			"unknown": [],
 		}
-	if use_combined_bucketing:
+	if combined_bucketing_enabled:
 		for occ_level in ["fully_visible", "mostly_visible", "partially_occluded", "mostly_occluded", "unknown"]:
 			occlusion_distance_bucket_accumulator[occ_level] = {
 				"near": [],
@@ -127,18 +144,19 @@ def evaluate_detection_frames(
 
 		frame_fp_breakdowns.append(compute_fp_breakdown(gt_boxes, summary["match_result"], iou_threshold=iou_threshold))
 
-		for bucket_name, bucket_summary in compute_distance_bucket_metrics(
-			gt_boxes=gt_boxes,
-			pred_boxes=pred_boxes,
-			matcher_fn=matcher_fn,
-			iou_threshold=iou_threshold,
-			class_aware=class_aware,
-			boundaries=distance_boundaries,
-		).items():
-			bucket_accumulator[bucket_name].append(bucket_summary)
+		if distance_bucketing_enabled:
+			for bucket_name, bucket_summary in compute_distance_bucket_metrics(
+				gt_boxes=gt_boxes,
+				pred_boxes=pred_boxes,
+				matcher_fn=matcher_fn,
+				iou_threshold=iou_threshold,
+				class_aware=class_aware,
+				boundaries=distance_boundaries,
+			).items():
+				bucket_accumulator[bucket_name].append(bucket_summary)
 
 		# Compute occlusion bucket metrics if enabled
-		if use_occlusion_bucketing:
+		if occlusion_bucketing_enabled:
 			for bucket_name, bucket_summary in compute_occlusion_bucket_metrics(
 				gt_boxes=gt_boxes,
 				pred_boxes=pred_boxes,
@@ -150,7 +168,7 @@ def evaluate_detection_frames(
 				occlusion_bucket_accumulator[bucket_name].append(bucket_summary)
 
 		# Compute combined occlusion+distance bucket metrics if enabled
-		if use_combined_bucketing:
+		if combined_bucketing_enabled:
 			for occ_level, dist_buckets in compute_occlusion_distance_bucket_metrics(
 				gt_boxes=gt_boxes,
 				pred_boxes=pred_boxes,
@@ -181,19 +199,15 @@ def evaluate_detection_frames(
 	fp_breakdown = aggregate_fp_breakdowns(frame_fp_breakdowns)
 
 	class_names = sorted({box.get("category_name") for box in all_gt_boxes if box.get("category_name")})
-	per_class_pr = summarize_by_class(
-		gt_boxes=all_gt_boxes,
-		pred_boxes=all_pred_boxes,
-		classes=class_names,
-		iou_threshold=iou_threshold,
-		matcher_fn=matcher_fn,
-	)
+	per_class_pr = summarize_by_class_from_frame_matches(frame_summaries, class_names)
 	map_result = compute_map(all_gt_boxes, all_pred_boxes, class_names, iou_threshold=iou_threshold)
 
-	bucket_metrics = {
-		bucket_name: aggregate_frame_summaries(bucket_summaries)
-		for bucket_name, bucket_summaries in bucket_accumulator.items()
-	}
+	bucket_metrics: Dict[str, Dict[str, Any]] = {}
+	if distance_bucketing_enabled:
+		bucket_metrics = {
+			bucket_name: aggregate_frame_summaries(bucket_summaries)
+			for bucket_name, bucket_summaries in bucket_accumulator.items()
+		}
 	scene_metrics = {
 		scene_name: aggregate_frame_summaries(scene_summaries)
 		for scene_name, scene_summaries in scene_accumulator.items()
@@ -210,14 +224,14 @@ def evaluate_detection_frames(
 
 	# Aggregate occlusion bucket results
 	occlusion_bucket_metrics = {}
-	if use_occlusion_bucketing:
+	if occlusion_bucketing_enabled:
 		occlusion_bucket_metrics = {
 			bucket_name: aggregate_frame_summaries(bucket_summaries)
 			for bucket_name, bucket_summaries in occlusion_bucket_accumulator.items()
 		}
 
 	occlusion_distance_bucket_metrics = {}
-	if use_combined_bucketing:
+	if combined_bucketing_enabled:
 		occlusion_distance_bucket_metrics = {
 			occ_level: {
 				dist_name: aggregate_frame_summaries(bucket_summaries)
@@ -256,8 +270,6 @@ def evaluate_detection_frames(
 		"overall": overall,
 		"map": map_result,
 		"per_class_pr": per_class_pr,
-		"distance_buckets": bucket_metrics,
-		"distance_bucket_labels": bucket_label_with_ranges(distance_boundaries),
 		"per_scene": scene_metrics,
 		"per_scenario": scenario_metrics,
 		"fp_breakdown": fp_breakdown,
@@ -265,13 +277,34 @@ def evaluate_detection_frames(
 		"topn_visualizations": visualized_topn,
 		"topn_per_scenario": visualized_topn_by_scenario,
 		"topn_manifest_path": manifest_path,
+		"bucketing_status": {
+			"distance": {
+				"requested": True,
+				"enabled": distance_bucketing_enabled,
+				"reason": "missing distance_to_ego" if not distance_bucketing_enabled else "ok",
+			},
+			"occlusion": {
+				"enabled": occlusion_bucketing_enabled,
+				"reason": "missing visibility_token" if not has_visibility_data else "ok",
+			},
+			"combined": {
+				"enabled": combined_bucketing_enabled,
+				"reason": "missing visibility_token" if not has_visibility_data else (
+					"missing distance_to_ego" if not has_distance_data else "ok"
+				),
+			},
+		},
 	}
 
-	if use_occlusion_bucketing:
+	if distance_bucketing_enabled:
+		result["distance_buckets"] = bucket_metrics
+		result["distance_bucket_labels"] = bucket_label_with_ranges(distance_boundaries)
+
+	if occlusion_bucketing_enabled:
 		result["occlusion_buckets"] = occlusion_bucket_metrics
 		result["occlusion_bucket_labels"] = occlusion_bucket_labels()
 
-	if use_combined_bucketing:
+	if combined_bucketing_enabled:
 		result["occlusion_distance_buckets"] = occlusion_distance_bucket_metrics
 		result["combined_bucket_labels"] = {
 			"occlusion": occlusion_bucket_labels(),

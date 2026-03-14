@@ -11,6 +11,8 @@ dataset_config: configs/dataset.yaml
 defaults:
   matcher: greedy         # greedy | hungarian
   iou_threshold: 0.5
+  bev_iou_mode: aabb      # aabb (fast) | polygon (yaw-aware, slower)
+  center_distance_threshold: 2.0
   max_frames: 50
   seed: 42
   class_aware: true
