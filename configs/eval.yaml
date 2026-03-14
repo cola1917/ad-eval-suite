@@ -58,7 +58,7 @@ strategies:
     iou_threshold: 0.3
     matcher: hungarian
     class_aware: true
-    metrics_level: full
+    metrics_level: standard
     max_frames: full
 
 # Strategy applied when no --strategy flag is provided

@@ -17,7 +17,7 @@ try:
 	from datasets.nuscenes_loader import NuScenesLoader
 	from eval.perception._common import MatcherFn, _infer_scenario_bucket, _resolve_matcher
 	from generators.detection_generator import DetectionGenerator
-	from matching.iou_matching import bev_iou, center_distance
+	from matching.iou_matching import bev_iou, center_distance, pairwise_iou_matrix
 	from metrics.precision_recall import summarize_detection_frame
 except ImportError:  # pragma: no cover
 	workspace_root = Path(__file__).resolve().parents[2]
@@ -26,7 +26,7 @@ except ImportError:  # pragma: no cover
 	from datasets.nuscenes_loader import NuScenesLoader
 	from eval.perception._common import MatcherFn, _infer_scenario_bucket, _resolve_matcher
 	from generators.detection_generator import DetectionGenerator
-	from matching.iou_matching import bev_iou, center_distance
+	from matching.iou_matching import bev_iou, center_distance, pairwise_iou_matrix
 	from metrics.precision_recall import summarize_detection_frame
 
 
@@ -83,15 +83,36 @@ def _build_distance_matrix(
 	if not gt_boxes or not pred_boxes:
 		return np.empty((len(gt_boxes), len(pred_boxes)), dtype=float)
 
+	iou_matrix = pairwise_iou_matrix(gt_boxes, pred_boxes)
+	valid_mask = iou_matrix >= iou_threshold
+
+	if class_aware:
+		gt_classes = np.array([str(box.get("category_name", "")) for box in gt_boxes], dtype=object)[:, None]
+		pred_classes = np.array([str(box.get("category_name", "")) for box in pred_boxes], dtype=object)[None, :]
+		valid_mask = valid_mask & (gt_classes == pred_classes)
+
+	if not np.any(valid_mask):
+		return np.full((len(gt_boxes), len(pred_boxes)), np.nan, dtype=float)
+
+	gt_xy = np.array([
+		[
+			float(box.get("translation", [0.0, 0.0, 0.0])[0]),
+			float(box.get("translation", [0.0, 0.0, 0.0])[1]),
+		]
+		for box in gt_boxes
+	], dtype=float)
+	pred_xy = np.array([
+		[
+			float(box.get("translation", [0.0, 0.0, 0.0])[0]),
+			float(box.get("translation", [0.0, 0.0, 0.0])[1]),
+		]
+		for box in pred_boxes
+	], dtype=float)
+
+	delta = gt_xy[:, None, :] - pred_xy[None, :, :]
+	distance_values = np.hypot(delta[..., 0], delta[..., 1])
 	distance_matrix = np.full((len(gt_boxes), len(pred_boxes)), np.nan, dtype=float)
-	for gt_index, gt_box in enumerate(gt_boxes):
-		for pred_index, pred_box in enumerate(pred_boxes):
-			if class_aware and gt_box.get("category_name") != pred_box.get("category_name"):
-				continue
-			iou_score = bev_iou(gt_box, pred_box)
-			if iou_score < iou_threshold:
-				continue
-			distance_matrix[gt_index, pred_index] = center_distance(gt_box, pred_box)
+	distance_matrix[valid_mask] = distance_values[valid_mask]
 	return distance_matrix
 
 
@@ -108,7 +129,8 @@ def _compute_motmetrics_summary(accumulator: Any) -> Dict[str, float]:
 		}
 
 	mh = mm.metrics.create()
-	metric_names = ["mota", "motp", "idf1", "num_switches", "mostly_tracked", "mostly_lost"]
+	# Keep the standard public tracking outputs while avoiding extra expensive metrics.
+	metric_names = ["mota", "motp", "idf1", "num_switches"]
 	summary = mh.compute(accumulator, metrics=metric_names, name="overall")
 	row = summary.loc["overall"]
 	return {
@@ -117,8 +139,8 @@ def _compute_motmetrics_summary(accumulator: Any) -> Dict[str, float]:
 		"motp": float(row.get("motp", 0.0)) if not np.isnan(float(row.get("motp", 0.0))) else 0.0,
 		"idf1": float(row.get("idf1", 0.0)),
 		"num_switches": float(row.get("num_switches", 0.0)),
-		"mostly_tracked": float(row.get("mostly_tracked", 0.0)),
-		"mostly_lost": float(row.get("mostly_lost", 0.0)),
+		"mostly_tracked": 0.0,
+		"mostly_lost": 0.0,
 	}
 
 
@@ -128,8 +150,19 @@ def evaluate_tracking_frames(
 	iou_threshold: float = 0.5,
 	matcher: str | MatcherFn = "hungarian",
 	class_aware: bool = True,
+	metrics_level: str = "standard",
 	center_distance_threshold: float | None = None,
 ) -> Dict[str, Any]:
+	resolved_metrics_level = (metrics_level or "standard").strip().lower()
+	if resolved_metrics_level not in {"basic", "standard", "full"}:
+		raise ValueError(f"Unsupported metrics_level: {metrics_level}")
+
+	# IDF1 is expensive (global assignment via motmetrics/scipy).
+	# Keep it for full mode only.
+	enable_motmetrics_overall = resolved_metrics_level == "full"
+	enable_motmetrics_buckets = resolved_metrics_level == "full"
+	enable_motmetrics_processing = enable_motmetrics_overall or enable_motmetrics_buckets
+
 	matcher_fn = _resolve_matcher(matcher)
 	if center_distance_threshold is not None:
 		matcher_fn = partial(matcher_fn, center_distance_threshold=center_distance_threshold)
@@ -154,7 +187,7 @@ def evaluate_tracking_frames(
 	per_scenario_counts: Dict[str, Dict[str, float]] = {}
 	per_class_counts: Dict[str, Dict[str, float]] = {}
 
-	overall_accumulator = _create_mot_accumulator()
+	overall_accumulator = _create_mot_accumulator() if enable_motmetrics_overall else None
 	per_scene_accumulators: Dict[str, Any] = {}
 	per_scenario_accumulators: Dict[str, Any] = {}
 	gt_id_map: Dict[str, int] = {}
@@ -168,20 +201,23 @@ def evaluate_tracking_frames(
 		gt_boxes = frame_record.get("gt_boxes", [])
 		pred_boxes = pred_record.get("pred_boxes", [])
 
-		gt_ids = [_safe_track_id(gt_box, f"gt_{index}") for index, gt_box in enumerate(gt_boxes)]
-		pred_ids = [_safe_track_id(pred_box, f"pred_{index}") for index, pred_box in enumerate(pred_boxes)]
-		numeric_gt_ids = _to_numeric_ids(gt_ids, gt_id_map, next_gt_id)
-		numeric_pred_ids = _to_numeric_ids(pred_ids, pred_id_map, next_pred_id)
-		distance_matrix = _build_distance_matrix(gt_boxes, pred_boxes, iou_threshold=iou_threshold, class_aware=class_aware)
+		if enable_motmetrics_processing:
+			gt_ids = [_safe_track_id(gt_box, f"gt_{index}") for index, gt_box in enumerate(gt_boxes)]
+			pred_ids = [_safe_track_id(pred_box, f"pred_{index}") for index, pred_box in enumerate(pred_boxes)]
+			numeric_gt_ids = _to_numeric_ids(gt_ids, gt_id_map, next_gt_id)
+			numeric_pred_ids = _to_numeric_ids(pred_ids, pred_id_map, next_pred_id)
+			distance_matrix = _build_distance_matrix(gt_boxes, pred_boxes, iou_threshold=iou_threshold, class_aware=class_aware)
 
-		if overall_accumulator is not None:
-			overall_accumulator.update(numeric_gt_ids, numeric_pred_ids, distance_matrix)
-			scene_acc = per_scene_accumulators.setdefault(scene_name, _create_mot_accumulator())
-			scenario_acc = per_scenario_accumulators.setdefault(scenario_name, _create_mot_accumulator())
-			if scene_acc is not None:
-				scene_acc.update(numeric_gt_ids, numeric_pred_ids, distance_matrix)
-			if scenario_acc is not None:
-				scenario_acc.update(numeric_gt_ids, numeric_pred_ids, distance_matrix)
+			if overall_accumulator is not None:
+				overall_accumulator.update(numeric_gt_ids, numeric_pred_ids, distance_matrix)
+
+			if enable_motmetrics_buckets:
+				scene_acc = per_scene_accumulators.setdefault(scene_name, _create_mot_accumulator())
+				scenario_acc = per_scenario_accumulators.setdefault(scenario_name, _create_mot_accumulator())
+				if scene_acc is not None:
+					scene_acc.update(numeric_gt_ids, numeric_pred_ids, distance_matrix)
+				if scenario_acc is not None:
+					scenario_acc.update(numeric_gt_ids, numeric_pred_ids, distance_matrix)
 
 		summary = summarize_detection_frame(
 			gt_boxes=gt_boxes,
@@ -270,17 +306,20 @@ def evaluate_tracking_frames(
 	mota = 1.0 - (fn_total + fp_total + idsw_total) / max(1, gt_total)
 	motp = distance_sum / max(1, tp_total)
 	track_quality = _aggregate_track_quality(track_totals)
-	motmetrics_overall = _compute_motmetrics_summary(overall_accumulator)
+	motmetrics_overall = _compute_motmetrics_summary(overall_accumulator) if enable_motmetrics_overall else {
+		"motmetrics_available": False,
+		"mota": 0.0,
+		"motp": 0.0,
+		"idf1": 0.0,
+		"num_switches": 0.0,
+		"mostly_tracked": 0.0,
+		"mostly_lost": 0.0,
+	}
 
 	if motmetrics_overall["motmetrics_available"]:
 		mota = motmetrics_overall["mota"]
 		motp = motmetrics_overall["motp"]
 		idsw_total = int(motmetrics_overall["num_switches"])
-		track_quality["mt"] = int(motmetrics_overall["mostly_tracked"])
-		track_quality["ml"] = int(motmetrics_overall["mostly_lost"])
-		if track_quality["num_tracks"] > 0:
-			track_quality["mt_ratio"] = track_quality["mt"] / track_quality["num_tracks"]
-			track_quality["ml_ratio"] = track_quality["ml"] / track_quality["num_tracks"]
 
 	def _finalize_bucket_metrics(raw: Dict[str, Dict[str, float]]) -> Dict[str, Dict[str, float]]:
 		final: Dict[str, Dict[str, float]] = {}
@@ -310,10 +349,11 @@ def evaluate_tracking_frames(
 				base[name]["idsw"] = int(mot_summary["num_switches"])
 		return base
 
-	per_scene_result = _attach_motmetrics_bucket_metrics(_finalize_bucket_metrics(per_scene_counts), per_scene_accumulators)
-	per_scenario_result = _attach_motmetrics_bucket_metrics(
-		_finalize_bucket_metrics(per_scenario_counts), per_scenario_accumulators
-	)
+	per_scene_result = _finalize_bucket_metrics(per_scene_counts)
+	per_scenario_result = _finalize_bucket_metrics(per_scenario_counts)
+	if enable_motmetrics_buckets:
+		per_scene_result = _attach_motmetrics_bucket_metrics(per_scene_result, per_scene_accumulators)
+		per_scenario_result = _attach_motmetrics_bucket_metrics(per_scenario_result, per_scenario_accumulators)
 
 	per_class_result: Dict[str, Dict[str, float]] = {}
 	for class_name, counts in per_class_counts.items():
@@ -338,6 +378,7 @@ def evaluate_tracking_frames(
 		"num_frames": len(frame_records_list),
 		"matcher": matcher if isinstance(matcher, str) else getattr(matcher, "__name__", "custom"),
 		"iou_threshold": iou_threshold,
+		"metrics_level": resolved_metrics_level,
 		"overall": {
 			"gt": gt_total,
 			"tp": tp_total,
@@ -364,6 +405,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 	parser.add_argument("--seed", type=int, default=42, help="Generator seed")
 	parser.add_argument("--matcher", choices=["greedy", "hungarian"], default="hungarian", help="Matcher")
 	parser.add_argument("--iou-threshold", type=float, default=0.3, help="Tracking IoU threshold")
+	parser.add_argument("--metrics-level", choices=["basic", "standard", "full"], default="standard", help="Tracking metrics level")
 	return parser
 
 
@@ -377,9 +419,15 @@ if __name__ == "__main__":
 	generator = DetectionGenerator(seed=args.seed)
 	preds = [generator.generate_frame_predictions(frame) for frame in frames]
 
-	result = evaluate_tracking_frames(frames, preds, iou_threshold=args.iou_threshold, matcher=args.matcher)
+	result = evaluate_tracking_frames(
+		frames,
+		preds,
+		iou_threshold=args.iou_threshold,
+		matcher=args.matcher,
+		metrics_level=args.metrics_level,
+	)
 	overall = result["overall"]
-	print(f"[tracking] frames={result['num_frames']} matcher={result['matcher']}")
+	print(f"[tracking] frames={result['num_frames']} matcher={result['matcher']} metrics={result['metrics_level']}")
 	print(
 		f"[tracking] MOTA={overall['mota']:.4f} MOTP={overall['motp']:.4f} IDF1={overall['idf1']:.4f} "
 		f"IDSW={overall['idsw']} MT={overall['mt']} ML={overall['ml']}"

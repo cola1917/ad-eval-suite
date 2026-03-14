@@ -133,6 +133,7 @@ def _build_markdown_report(result: Dict[str, Any], config: Dict[str, Any]) -> st
 		f"| Detection IoU threshold | {detection['iou_threshold']} |",
 		f"| Tracking IoU threshold | {tracking['iou_threshold']} |",
 		f"| BEV IoU mode | {config.get('bev_iou_mode', 'aabb')} |",
+		f"| Metrics level | {config.get('metrics_level', 'standard')} |",
 		*(
 			[f"| Center distance threshold (m) | {config['center_distance_threshold']} |"]
 			if config.get("center_distance_threshold") is not None else []
@@ -482,8 +483,8 @@ def main() -> int:
 		prediction_records=prediction_records,
 		iou_threshold=resolved_det_iou,
 		matcher=resolved_matcher,
-		topn_visualizations=0 if resolved_metrics_level == "basic" else args.topn,
-		topn_per_scenario=0 if resolved_metrics_level == "basic" else args.topn_per_scenario,
+		topn_visualizations=args.topn if resolved_metrics_level == "full" else 0,
+		topn_per_scenario=args.topn_per_scenario if resolved_metrics_level == "full" else 0,
 		visualization_dir=str(paths["viz_dir"]),
 		center_distance_threshold=resolved_center_distance,
 	)
@@ -492,6 +493,7 @@ def main() -> int:
 		prediction_records=prediction_records,
 		iou_threshold=resolved_trk_iou,
 		matcher=resolved_matcher,
+		metrics_level=resolved_metrics_level,
 		center_distance_threshold=resolved_center_distance,
 	)
 
@@ -532,6 +534,7 @@ def main() -> int:
 			"dataset": f"{dataset_name} ({resolved_version})",
 			"scene": args.scene_id or args.scenes or "full",
 			"bev_iou_mode": resolved_bev_iou_mode,
+			"metrics_level": resolved_metrics_level,
 			"center_distance_threshold": resolved_center_distance,
 			"seed": args.seed,
 			"strategy": strategy_name,

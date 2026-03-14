@@ -72,7 +72,7 @@ python scripts/run_perception_eval.py \
     --strategy detection_10cls \
     --scenes first \
     --max-frames 50 \
-    --metrics full \
+    --metrics standard \
     --run-name my_run
 
 # Scene selection supports: first | half | full | explicit list
@@ -82,6 +82,20 @@ python scripts/run_perception_eval.py --scenes scene-0061,scene-0103 --max-frame
 Detection and tracking are evaluated together and written to `outputs/perception/<run-name>/`.
 
 `--max-frames` is applied per selected scene (`full` means no frame cap).
+
+### Metrics Levels (`--metrics`)
+
+`--metrics` controls the trade-off between runtime and analysis depth.
+
+| Level | Tracking IDF1 | Top-N Visualization | Typical Use |
+|------|----------------|---------------------|-------------|
+| `basic` | Disabled | Disabled | Fast smoke checks / CI sanity runs |
+| `standard` | Disabled | Disabled | Default day-to-day benchmarking (fast) |
+| `full` | Enabled | Enabled | Final reporting / deep diagnosis |
+
+Notes:
+- `standard` intentionally skips IDF1-related global assignment to reduce runtime.
+- `full` keeps the complete tracking and visualization workflow.
 
 ### Prediction
 
