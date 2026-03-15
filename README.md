@@ -77,6 +77,12 @@ python scripts/run_perception_eval.py \
 
 # Scene selection supports: first | half | full | explicit list
 python scripts/run_perception_eval.py --scenes scene-0061,scene-0103 --max-frames 5
+
+# Scene-level parallel evaluation (default enabled only for standard,basic)
+python scripts/run_perception_eval.py --scenes full --scene-workers 4
+
+# Customize modes allowed to parallelize
+python scripts/run_perception_eval.py --scene-workers 4 --parallel-modes standard,basic
 ```
 
 Detection and tracking are evaluated together and written to `outputs/perception/<run-name>/`.
@@ -96,6 +102,7 @@ Detection and tracking are evaluated together and written to `outputs/perception
 Notes:
 - `standard` intentionally skips IDF1-related global assignment to reduce runtime.
 - `full` keeps the complete tracking and visualization workflow.
+- Scene-level parallelism defaults to `--parallel-modes standard,basic`; `full` runs serial by design.
 
 ### Prediction
 

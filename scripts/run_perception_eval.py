@@ -1,17 +1,19 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import json
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Set, Tuple
 
 try:
 	from datasets.nuscenes_loader import NuScenesLoader
 	from eval.perception.detection_eval import evaluate_detection_frames
 	from eval.perception.tracking_eval import evaluate_tracking_frames
 	from generators.detection_generator import DetectionGenerator, DetectionGeneratorConfig
+	from metrics.ap_map import compute_map
 	from matching.iou_matching import set_bev_iou_mode
 	from utils.category_remap import CategoryRemapper
 except ImportError:  # pragma: no cover
@@ -22,6 +24,7 @@ except ImportError:  # pragma: no cover
 	from eval.perception.detection_eval import evaluate_detection_frames
 	from eval.perception.tracking_eval import evaluate_tracking_frames
 	from generators.detection_generator import DetectionGenerator, DetectionGeneratorConfig
+	from metrics.ap_map import compute_map
 	from matching.iou_matching import set_bev_iou_mode
 	from utils.category_remap import CategoryRemapper
 
@@ -82,6 +85,17 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 	parser.add_argument("--topn-per-scenario", type=int, default=1, help="Top-N per scenario")
 	parser.add_argument("--output-dir", default="outputs/perception", help="Root output directory")
 	parser.add_argument("--run-name", default=None, help="Optional run name for output folder")
+	parser.add_argument(
+		"--scene-workers",
+		type=int,
+		default=1,
+		help="Number of worker processes for scene-level parallel evaluation (1 disables parallelism)",
+	)
+	parser.add_argument(
+		"--parallel-modes",
+		default="standard,basic",
+		help="Comma-separated metrics levels allowed to use scene-level parallelism (default: standard,basic)",
+	)
 
 	parser.add_argument(
 		"--center-distance-threshold", type=float, default=None,
@@ -408,6 +422,342 @@ def _resolve_scene_ids(all_scene_ids: List[str], scenes_arg: str | None, explici
 	return requested
 
 
+def _parse_parallel_modes(raw_value: str | None) -> Set[str]:
+	if raw_value is None:
+		return {"standard", "basic"}
+	parsed = {part.strip().lower() for part in str(raw_value).split(",") if part.strip()}
+	if not parsed:
+		return {"standard", "basic"}
+	allowed = {"basic", "standard", "full"}
+	unknown = sorted(parsed - allowed)
+	if unknown:
+		raise ValueError(f"Unknown --parallel-modes values: {unknown}. Allowed: {sorted(allowed)}")
+	return parsed
+
+
+def _compute_precision_recall_f1(tp: int, fp: int, fn: int) -> Dict[str, float]:
+	precision = tp / (tp + fp) if tp + fp > 0 else 0.0
+	recall = tp / (tp + fn) if tp + fn > 0 else 0.0
+	f1 = 2.0 * precision * recall / (precision + recall) if precision + recall > 0 else 0.0
+	return {"precision": precision, "recall": recall, "f1": f1}
+
+
+def _merge_metric_summaries(items: List[Dict[str, Any]]) -> Dict[str, Any]:
+	tp = sum(int(item.get("tp", 0)) for item in items)
+	fp = sum(int(item.get("fp", 0)) for item in items)
+	fn = sum(int(item.get("fn", 0)) for item in items)
+	metrics = _compute_precision_recall_f1(tp, fp, fn)
+	return {"tp": tp, "fp": fp, "fn": fn, **metrics, "num_frames": len(items)}
+
+
+def _merge_named_metric_summaries(named_items: List[Dict[str, Dict[str, Any]]]) -> Dict[str, Dict[str, Any]]:
+	buckets: Dict[str, List[Dict[str, Any]]] = {}
+	for item in named_items:
+		for name, metrics in item.items():
+			buckets.setdefault(name, []).append(metrics)
+	return {name: _merge_metric_summaries(values) for name, values in buckets.items()}
+
+
+def _merge_detection_scene_results(
+	scene_results: List[Dict[str, Any]],
+	iou_threshold: float,
+	matcher: str,
+) -> Dict[str, Any]:
+	if not scene_results:
+		return {
+			"num_frames": 0,
+			"iou_threshold": iou_threshold,
+			"matcher": matcher,
+			"overall": {"tp": 0, "fp": 0, "fn": 0, **_compute_precision_recall_f1(0, 0, 0), "num_frames": 0},
+			"map": {"iou_threshold": iou_threshold, "classes": [], "per_class": {}, "map": 0.0},
+			"per_class_pr": {},
+			"per_scene": {},
+			"per_scenario": {},
+			"fp_breakdown": {"localization": 0, "classification": 0, "duplicate": 0, "background": 0},
+			"mean_localization_error": 0.0,
+			"topn_visualizations": [],
+			"topn_per_scenario": {},
+			"topn_manifest_path": "",
+			"bucketing_status": {
+				"distance": {"requested": True, "enabled": False, "reason": "no data"},
+				"occlusion": {"enabled": False, "reason": "no data"},
+				"combined": {"enabled": False, "reason": "no data"},
+			},
+		}
+
+	all_gt_boxes: List[Dict[str, Any]] = []
+	all_pred_boxes: List[Dict[str, Any]] = []
+	per_scene: Dict[str, Dict[str, Any]] = {}
+	per_scenario_inputs: List[Dict[str, Dict[str, Any]]] = []
+	distance_bucket_inputs: List[Dict[str, Dict[str, Any]]] = []
+	occlusion_bucket_inputs: List[Dict[str, Dict[str, Any]]] = []
+	occlusion_distance_inputs: List[Dict[str, Dict[str, Dict[str, Any]]]] = []
+	per_class_counts: Dict[str, Dict[str, int]] = {}
+	fp_breakdown = {"localization": 0, "classification": 0, "duplicate": 0, "background": 0}
+	mean_error_sum = 0.0
+	total_tp = 0
+	total_frames = 0
+	bucketing_status = scene_results[0]["detection"].get("bucketing_status", {})
+
+	for scene_result in scene_results:
+		detection = scene_result["detection"]
+		all_gt_boxes.extend(scene_result.get("all_gt_boxes", []))
+		all_pred_boxes.extend(scene_result.get("all_pred_boxes", []))
+		total_frames += int(detection.get("num_frames", 0))
+
+		for name, metrics in detection.get("per_scene", {}).items():
+			per_scene[name] = metrics
+
+		per_scenario_inputs.append(detection.get("per_scenario", {}))
+		if detection.get("distance_buckets"):
+			distance_bucket_inputs.append(detection["distance_buckets"])
+		if detection.get("occlusion_buckets"):
+			occlusion_bucket_inputs.append(detection["occlusion_buckets"])
+		if detection.get("occlusion_distance_buckets"):
+			occlusion_distance_inputs.append(detection["occlusion_distance_buckets"])
+
+		for bucket_name in fp_breakdown:
+			fp_breakdown[bucket_name] += int(detection.get("fp_breakdown", {}).get(bucket_name, 0))
+
+		overall = detection.get("overall", {})
+		tp = int(overall.get("tp", 0))
+		total_tp += tp
+		mean_error_sum += float(detection.get("mean_localization_error", 0.0)) * tp
+
+		for class_name, metrics in detection.get("per_class_pr", {}).items():
+			counts = per_class_counts.setdefault(class_name, {"tp": 0, "fp": 0, "fn": 0})
+			counts["tp"] += int(metrics.get("tp", 0))
+			counts["fp"] += int(metrics.get("fp", 0))
+			counts["fn"] += int(metrics.get("fn", 0))
+
+	if isinstance(bucketing_status, dict):
+		for dim in ("distance", "occlusion", "combined"):
+			enabled_all = all(
+				bool(scene_result["detection"].get("bucketing_status", {}).get(dim, {}).get("enabled", False))
+				for scene_result in scene_results
+			)
+			reason = "ok" if enabled_all else "partial_or_missing_fields"
+			if dim not in bucketing_status:
+				bucketing_status[dim] = {}
+			bucketing_status[dim]["enabled"] = enabled_all
+			bucketing_status[dim]["reason"] = reason
+			if dim == "distance":
+				bucketing_status[dim]["requested"] = True
+
+	overall_metrics = _merge_metric_summaries([scene_result["detection"].get("overall", {}) for scene_result in scene_results])
+	overall_metrics["num_frames"] = total_frames
+
+	class_names = sorted({str(box.get("category_name")) for box in all_gt_boxes if box.get("category_name")})
+	map_result = compute_map(all_gt_boxes, all_pred_boxes, class_names, iou_threshold=iou_threshold)
+
+	per_class_pr = {}
+	for class_name, counts in per_class_counts.items():
+		metrics = _compute_precision_recall_f1(counts["tp"], counts["fp"], counts["fn"])
+		per_class_pr[class_name] = {
+			"tp": counts["tp"],
+			"fp": counts["fp"],
+			"fn": counts["fn"],
+			**metrics,
+			"num_frames": total_frames,
+		}
+
+	result = {
+		"num_frames": total_frames,
+		"iou_threshold": iou_threshold,
+		"matcher": matcher,
+		"overall": overall_metrics,
+		"map": map_result,
+		"per_class_pr": per_class_pr,
+		"per_scene": per_scene,
+		"per_scenario": _merge_named_metric_summaries(per_scenario_inputs),
+		"fp_breakdown": fp_breakdown,
+		"mean_localization_error": mean_error_sum / max(1, total_tp),
+		"topn_visualizations": [],
+		"topn_per_scenario": {},
+		"topn_manifest_path": "",
+		"bucketing_status": bucketing_status,
+	}
+
+	if distance_bucket_inputs:
+		result["distance_buckets"] = _merge_named_metric_summaries(distance_bucket_inputs)
+		result["distance_bucket_labels"] = scene_results[0]["detection"].get("distance_bucket_labels", {})
+
+	if occlusion_bucket_inputs:
+		result["occlusion_buckets"] = _merge_named_metric_summaries(occlusion_bucket_inputs)
+		result["occlusion_bucket_labels"] = scene_results[0]["detection"].get("occlusion_bucket_labels", {})
+
+	if occlusion_distance_inputs:
+		merged_combined: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
+		for combined_item in occlusion_distance_inputs:
+			for occ_level, dist_dict in combined_item.items():
+				occ_container = merged_combined.setdefault(occ_level, {})
+				for dist_name, metrics in dist_dict.items():
+					occ_container.setdefault(dist_name, []).append(metrics)
+		result["occlusion_distance_buckets"] = {
+			occ_level: {
+				dist_name: _merge_metric_summaries(items)
+				for dist_name, items in dist_dict.items()
+			}
+			for occ_level, dist_dict in merged_combined.items()
+		}
+		result["combined_bucket_labels"] = scene_results[0]["detection"].get("combined_bucket_labels", {})
+
+	return result
+
+
+def _merge_tracking_scene_results(
+	scene_results: List[Dict[str, Any]],
+	iou_threshold: float,
+	matcher: str,
+	metrics_level: str,
+) -> Dict[str, Any]:
+	total_frames = sum(int(scene_result["tracking"].get("num_frames", 0)) for scene_result in scene_results)
+	gt = tp = fp = fn = idsw = mt = ml = num_tracks = 0
+	motp_weighted_sum = 0.0
+	per_scene: Dict[str, Dict[str, Any]] = {}
+	per_scenario_raw: Dict[str, Dict[str, float]] = {}
+	per_class_raw: Dict[str, Dict[str, float]] = {}
+
+	for scene_result in scene_results:
+		tracking = scene_result["tracking"]
+		overall = tracking.get("overall", {})
+		gt += int(overall.get("gt", 0))
+		tp += int(overall.get("tp", 0))
+		fp += int(overall.get("fp", 0))
+		fn += int(overall.get("fn", 0))
+		idsw += int(overall.get("idsw", 0))
+		mt += int(overall.get("mt", 0))
+		ml += int(overall.get("ml", 0))
+		num_tracks += int(overall.get("num_tracks", 0))
+		motp_weighted_sum += float(overall.get("motp", 0.0)) * int(overall.get("tp", 0))
+
+		for name, metrics in tracking.get("per_scene", {}).items():
+			per_scene[name] = metrics
+
+		for scenario_name, metrics in tracking.get("per_scenario", {}).items():
+			counts = per_scenario_raw.setdefault(
+				scenario_name,
+				{"gt": 0.0, "tp": 0.0, "fp": 0.0, "fn": 0.0, "idsw": 0.0},
+			)
+			counts["gt"] += float(metrics.get("gt", 0))
+			counts["tp"] += float(metrics.get("tp", 0))
+			counts["fp"] += float(metrics.get("fp", 0))
+			counts["fn"] += float(metrics.get("fn", 0))
+			counts["idsw"] += float(metrics.get("idsw", 0))
+
+		for class_name, metrics in tracking.get("per_class", {}).items():
+			counts = per_class_raw.setdefault(
+				class_name,
+				{"gt": 0.0, "tp": 0.0, "fp": 0.0, "fn": 0.0, "idsw": 0.0, "motp_weighted": 0.0},
+			)
+			class_tp = float(metrics.get("tp", 0))
+			counts["gt"] += float(metrics.get("gt", 0))
+			counts["tp"] += class_tp
+			counts["fp"] += float(metrics.get("fp", 0))
+			counts["fn"] += float(metrics.get("fn", 0))
+			counts["idsw"] += float(metrics.get("idsw", 0))
+			counts["motp_weighted"] += float(metrics.get("motp", 0.0)) * class_tp
+
+	mota = 1.0 - (fn + fp + idsw) / max(1, gt)
+	motp = motp_weighted_sum / max(1, tp)
+	per_scenario = {}
+	for scenario_name, counts in per_scenario_raw.items():
+		scenario_gt = int(counts["gt"])
+		scenario_tp = int(counts["tp"])
+		scenario_fp = int(counts["fp"])
+		scenario_fn = int(counts["fn"])
+		scenario_idsw = int(counts["idsw"])
+		scenario_mota = 1.0 - (scenario_fn + scenario_fp + scenario_idsw) / max(1, scenario_gt)
+		per_scenario[scenario_name] = {
+			"gt": scenario_gt,
+			"tp": scenario_tp,
+			"fp": scenario_fp,
+			"fn": scenario_fn,
+			"idsw": scenario_idsw,
+			"mota": scenario_mota,
+		}
+
+	per_class = {}
+	for class_name, counts in per_class_raw.items():
+		class_gt = int(counts["gt"])
+		class_tp = int(counts["tp"])
+		class_fp = int(counts["fp"])
+		class_fn = int(counts["fn"])
+		class_idsw = int(counts["idsw"])
+		class_mota = 1.0 - (class_fn + class_fp + class_idsw) / max(1, class_gt)
+		class_motp = float(counts["motp_weighted"]) / max(1, class_tp)
+		per_class[class_name] = {
+			"gt": class_gt,
+			"tp": class_tp,
+			"fp": class_fp,
+			"fn": class_fn,
+			"idsw": class_idsw,
+			"mota": class_mota,
+			"motp": class_motp,
+		}
+
+	return {
+		"num_frames": total_frames,
+		"matcher": matcher,
+		"iou_threshold": iou_threshold,
+		"metrics_level": metrics_level,
+		"overall": {
+			"gt": gt,
+			"tp": tp,
+			"fp": fp,
+			"fn": fn,
+			"idsw": idsw,
+			"mota": mota,
+			"motp": motp,
+			"idf1": 0.0,
+			"motmetrics_available": False,
+			"num_tracks": num_tracks,
+			"mt": mt,
+			"ml": ml,
+			"mt_ratio": mt / max(1, num_tracks),
+			"ml_ratio": ml / max(1, num_tracks),
+		},
+		"per_scene": per_scene,
+		"per_scenario": per_scenario,
+		"per_class": per_class,
+	}
+
+
+def _evaluate_scene_chunk_worker(
+	frame_records: List[Dict[str, Any]],
+	prediction_records: List[Dict[str, Any]],
+	det_iou_threshold: float,
+	trk_iou_threshold: float,
+	matcher: str,
+	metrics_level: str,
+	center_distance_threshold: float | None,
+) -> Dict[str, Any]:
+	detection = evaluate_detection_frames(
+		frame_records=frame_records,
+		prediction_records=prediction_records,
+		iou_threshold=det_iou_threshold,
+		matcher=matcher,
+		topn_visualizations=0,
+		topn_per_scenario=0,
+		visualization_dir=None,
+		center_distance_threshold=center_distance_threshold,
+	)
+	tracking = evaluate_tracking_frames(
+		frame_records=frame_records,
+		prediction_records=prediction_records,
+		iou_threshold=trk_iou_threshold,
+		matcher=matcher,
+		metrics_level=metrics_level,
+		center_distance_threshold=center_distance_threshold,
+	)
+	return {
+		"detection": detection,
+		"tracking": tracking,
+		"all_gt_boxes": [box for frame in frame_records for box in frame.get("gt_boxes", [])],
+		"all_pred_boxes": [box for frame in prediction_records for box in frame.get("pred_boxes", [])],
+	}
+
+
 def main() -> int:
 	args = _build_arg_parser().parse_args()
 	paths = _build_run_paths(args.output_dir, args.run_name)
@@ -438,6 +788,7 @@ def main() -> int:
 	cli_max_frames = _parse_max_frames(args.max_frames) if args.max_frames is not None else None
 	strategy_max_frames = _parse_max_frames(configured_max_frames)
 	resolved_max_frames = cli_max_frames if args.max_frames is not None else strategy_max_frames
+	resolved_parallel_modes = _parse_parallel_modes(args.parallel_modes)
 
 	# 4) Build category remapper from resolved schema.
 	schema_name = strategy_params.get("category_schema") or dataset_entry.get("category_schema", "raw")
@@ -454,6 +805,21 @@ def main() -> int:
 	selected_scene_ids = _resolve_scene_ids(all_scene_ids, args.scenes, args.scene_id)
 
 	raw_frame_records: List[Dict[str, Any]] = []
+	parallel_enabled = False
+	if resolved_metrics_level == "full":
+		print("[run] scene parallelism disabled for metrics=full (tracking IDF1 flow stays serial).")
+	elif args.scene_workers <= 1:
+		print("[run] scene parallelism disabled: --scene-workers <= 1")
+	elif len(selected_scene_ids) <= 1:
+		print("[run] scene parallelism disabled: only one selected scene")
+	elif resolved_metrics_level not in resolved_parallel_modes:
+		print(
+			f"[run] scene parallelism disabled: metrics={resolved_metrics_level} "
+			f"not in --parallel-modes={sorted(resolved_parallel_modes)}"
+		)
+	else:
+		parallel_enabled = True
+
 	for scene in selected_scene_ids:
 		raw_frame_records.extend(loader.iter_frame_records(scene_id=scene, max_frames=resolved_max_frames))
 
@@ -478,24 +844,64 @@ def main() -> int:
 		frame_records = raw_frame_records
 		prediction_records = raw_prediction_records
 
-	result = evaluate_detection_frames(
-		frame_records=frame_records,
-		prediction_records=prediction_records,
-		iou_threshold=resolved_det_iou,
-		matcher=resolved_matcher,
-		topn_visualizations=args.topn if resolved_metrics_level == "full" else 0,
-		topn_per_scenario=args.topn_per_scenario if resolved_metrics_level == "full" else 0,
-		visualization_dir=str(paths["viz_dir"]),
-		center_distance_threshold=resolved_center_distance,
-	)
-	tracking_result = evaluate_tracking_frames(
-		frame_records=frame_records,
-		prediction_records=prediction_records,
-		iou_threshold=resolved_trk_iou,
-		matcher=resolved_matcher,
-		metrics_level=resolved_metrics_level,
-		center_distance_threshold=resolved_center_distance,
-	)
+	if parallel_enabled:
+		print(f"[run] scene-level parallel evaluation enabled: workers={args.scene_workers} scenes={len(selected_scene_ids)}")
+		scene_chunks: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
+		for frame_record, pred_record in zip(frame_records, prediction_records):
+			scene_name = str(frame_record.get("scene_name", "unknown_scene"))
+			chunk = scene_chunks.setdefault(scene_name, {"frames": [], "preds": []})
+			chunk["frames"].append(frame_record)
+			chunk["preds"].append(pred_record)
+
+		ordered_scene_names = [scene for scene in selected_scene_ids if scene in scene_chunks]
+		ordered_scene_names.extend([name for name in scene_chunks.keys() if name not in ordered_scene_names])
+
+		scene_eval_results: Dict[str, Dict[str, Any]] = {}
+		with ProcessPoolExecutor(max_workers=args.scene_workers) as executor:
+			future_map = {
+				executor.submit(
+					_evaluate_scene_chunk_worker,
+					scene_chunks[scene_name]["frames"],
+					scene_chunks[scene_name]["preds"],
+					resolved_det_iou,
+					resolved_trk_iou,
+					resolved_matcher,
+					resolved_metrics_level,
+					resolved_center_distance,
+				): scene_name
+				for scene_name in ordered_scene_names
+			}
+			for future in as_completed(future_map):
+				scene_name = future_map[future]
+				scene_eval_results[scene_name] = future.result()
+
+		merged_inputs = [scene_eval_results[scene_name] for scene_name in ordered_scene_names]
+		result = _merge_detection_scene_results(merged_inputs, iou_threshold=resolved_det_iou, matcher=resolved_matcher)
+		tracking_result = _merge_tracking_scene_results(
+			merged_inputs,
+			iou_threshold=resolved_trk_iou,
+			matcher=resolved_matcher,
+			metrics_level=resolved_metrics_level,
+		)
+	else:
+		result = evaluate_detection_frames(
+			frame_records=frame_records,
+			prediction_records=prediction_records,
+			iou_threshold=resolved_det_iou,
+			matcher=resolved_matcher,
+			topn_visualizations=args.topn if resolved_metrics_level == "full" else 0,
+			topn_per_scenario=args.topn_per_scenario if resolved_metrics_level == "full" else 0,
+			visualization_dir=str(paths["viz_dir"]),
+			center_distance_threshold=resolved_center_distance,
+		)
+		tracking_result = evaluate_tracking_frames(
+			frame_records=frame_records,
+			prediction_records=prediction_records,
+			iou_threshold=resolved_trk_iou,
+			matcher=resolved_matcher,
+			metrics_level=resolved_metrics_level,
+			center_distance_threshold=resolved_center_distance,
+		)
 
 	full_result = {
 		"detection": result,
@@ -509,6 +915,11 @@ def main() -> int:
 		"max_frames_per_scene": resolved_max_frames,
 		"selected_scenes": selected_scene_ids,
 		"metrics_level": resolved_metrics_level,
+		"parallel": {
+			"enabled": parallel_enabled,
+			"scene_workers": args.scene_workers,
+			"parallel_modes": sorted(resolved_parallel_modes),
+		},
 		"strategy": strategy_name,
 		"category_schema": schema_name,
 		"matcher": resolved_matcher,
