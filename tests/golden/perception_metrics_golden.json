@@ -1,0 +1,28 @@
+{
+  "detection": {
+    "num_frames": 2,
+    "map": 0.5,
+    "overall": {
+      "tp": 2,
+      "fp": 2,
+      "fn": 1,
+      "precision": 0.5,
+      "recall": 0.6666666666666666,
+      "f1": 0.5714285714285715
+    }
+  },
+  "tracking": {
+    "num_frames": 2,
+    "overall": {
+      "gt": 3,
+      "tp": 2,
+      "fp": 2,
+      "fn": 1,
+      "idsw": 1,
+      "mota": -0.33333333333333326,
+      "motp": 0.05,
+      "mt": 1,
+      "ml": 1
+    }
+  }
+}
