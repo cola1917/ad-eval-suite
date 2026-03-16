@@ -9,12 +9,12 @@ from typing import Any, Dict, List
 import sys
 
 try:
-	from simulation.validation import discover_xosc_files
+	from simulator_export.validation import discover_xosc_files
 except ImportError:  # pragma: no cover
 	workspace_root = Path(__file__).resolve().parents[1]
 	if str(workspace_root) not in sys.path:
 		sys.path.insert(0, str(workspace_root))
-	from simulation.validation import discover_xosc_files
+	from simulator_export.validation import discover_xosc_files
 
 
 def _build_parser() -> argparse.ArgumentParser:

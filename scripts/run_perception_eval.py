@@ -11,12 +11,12 @@ try:
 	from datasets.nuscenes_loader import NuScenesLoader
 	from eval.perception.detection_eval import evaluate_detection_frames
 	from eval.perception.tracking_eval import evaluate_tracking_frames
-	from mining.pipeline import FailureMiningConfig, run_failure_mining
-	from mining.rank_frames import FailureScoreWeights
+	from failure_mining.pipeline import FailureMiningConfig, run_failure_mining
+	from failure_mining.rank_frames import FailureScoreWeights
 	from generators.detection_generator import DetectionGenerator, DetectionGeneratorConfig
 	from matching.iou_matching import set_bev_iou_mode
-	from simulation.export_openscenario import export_snapshot_to_xosc
-	from visualization.replay_scene import export_scene_frames, export_scene_gif
+	from simulator_export.export_openscenario import export_snapshot_to_xosc
+	from tools.replay_scene import export_scene_frames, export_scene_gif
 	from utils.category_remap import CategoryRemapper
 except ImportError:  # pragma: no cover
 	workspace_root = Path(__file__).resolve().parents[1]
@@ -25,12 +25,12 @@ except ImportError:  # pragma: no cover
 	from datasets.nuscenes_loader import NuScenesLoader
 	from eval.perception.detection_eval import evaluate_detection_frames
 	from eval.perception.tracking_eval import evaluate_tracking_frames
-	from mining.pipeline import FailureMiningConfig, run_failure_mining
-	from mining.rank_frames import FailureScoreWeights
+	from failure_mining.pipeline import FailureMiningConfig, run_failure_mining
+	from failure_mining.rank_frames import FailureScoreWeights
 	from generators.detection_generator import DetectionGenerator, DetectionGeneratorConfig
 	from matching.iou_matching import set_bev_iou_mode
-	from simulation.export_openscenario import export_snapshot_to_xosc
-	from visualization.replay_scene import export_scene_frames, export_scene_gif
+	from simulator_export.export_openscenario import export_snapshot_to_xosc
+	from tools.replay_scene import export_scene_frames, export_scene_gif
 	from utils.category_remap import CategoryRemapper
 
 
@@ -506,7 +506,8 @@ def _resolve_scene_ids(all_scene_ids: List[str], scenes_arg: str | None, explici
 	return requested
 
 
-def main_with_args(args: argparse.Namespace) -> int:
+def main() -> int:
+	args = _build_arg_parser().parse_args()
 	paths = _build_run_paths(args.output_dir, args.run_name)
 
 	# 1) Load YAML configs.
@@ -598,58 +599,42 @@ def main_with_args(args: argparse.Namespace) -> int:
 		"detection": result,
 		"tracking": tracking_result,
 	}
-	skip_failure_mining = bool(getattr(args, "skip_failure_mining", False))
-	if skip_failure_mining:
-		failure_mining = {
-			"enabled": False,
-			"reason": "disabled_by_flag",
-			"top_k_scenes_path": "",
-			"top_k_frames_path": "",
-			"snapshot_files": [],
-		}
-		artifact_exports = {
-			"replay_exports": [],
-			"replay_gif_exports": [],
-			"xosc_exports": [],
-		}
-	else:
-		failure_mining = run_failure_mining(
-			run_dir=paths["run_dir"],
-			frame_records=frame_records,
-			prediction_records=prediction_records,
-			iou_threshold=resolved_det_iou,
-			matcher=resolved_matcher,
-			class_aware=True,
-			config=FailureMiningConfig(
-				top_k_scenes=max(0, int(args.failure_topk_scenes)),
-				top_k_frames=max(0, int(args.failure_topk_frames)),
-				weights=FailureScoreWeights(
-					w_fn=float(args.failure_w_fn),
-					w_fp=float(args.failure_w_fp),
-					w_map=float(args.failure_w_map),
-					w_idsw=float(args.failure_w_idsw),
-				),
-				coordinate_system="nuscenes_global",
+	failure_mining = run_failure_mining(
+		run_dir=paths["run_dir"],
+		frame_records=frame_records,
+		prediction_records=prediction_records,
+		iou_threshold=resolved_det_iou,
+		matcher=resolved_matcher,
+		class_aware=True,
+		config=FailureMiningConfig(
+			top_k_scenes=max(0, int(args.failure_topk_scenes)),
+			top_k_frames=max(0, int(args.failure_topk_frames)),
+			weights=FailureScoreWeights(
+				w_fn=float(args.failure_w_fn),
+				w_fp=float(args.failure_w_fp),
+				w_map=float(args.failure_w_map),
+				w_idsw=float(args.failure_w_idsw),
 			),
-		)
-		artifact_exports = _export_failure_mining_artifacts(
-			run_dir=paths["run_dir"],
-			failure_mining=failure_mining,
-			export_replay=bool(args.export_replay),
-			export_replay_gif=bool(args.export_replay_gif),
-			replay_gif_fps=max(1, int(args.replay_gif_fps)),
-			replay_show_trajectories=bool(args.replay_show_trajectories),
-			replay_view_mode=str(args.replay_view_mode),
-			replay_view_half_extent=float(args.replay_view_half_extent),
-			replay_dpi=max(1, int(args.replay_dpi)),
-			overlay_map=bool(args.overlay_map),
-			map_data_root=str(args.map_data_root),
-			export_xosc=bool(args.export_xosc),
-			xosc_map_file=str(args.xosc_map_file),
-			xosc_scene_graph_file=str(args.xosc_scene_graph_file),
-		)
-
+			coordinate_system="nuscenes_global",
+		),
+	)
 	full_result["failure_mining"] = failure_mining
+	artifact_exports = _export_failure_mining_artifacts(
+		run_dir=paths["run_dir"],
+		failure_mining=failure_mining,
+		export_replay=bool(args.export_replay),
+		export_replay_gif=bool(args.export_replay_gif),
+		replay_gif_fps=max(1, int(args.replay_gif_fps)),
+		replay_show_trajectories=bool(args.replay_show_trajectories),
+		replay_view_mode=str(args.replay_view_mode),
+		replay_view_half_extent=float(args.replay_view_half_extent),
+		replay_dpi=max(1, int(args.replay_dpi)),
+		overlay_map=bool(args.overlay_map),
+		map_data_root=str(args.map_data_root),
+		export_xosc=bool(args.export_xosc),
+		xosc_map_file=str(args.xosc_map_file),
+		xosc_scene_graph_file=str(args.xosc_scene_graph_file),
+	)
 	full_result["failure_mining"].update(artifact_exports)
 	full_result["config"] = {
 		"dataset_name": dataset_name,
@@ -724,11 +709,6 @@ def main_with_args(args: argparse.Namespace) -> int:
 
 	loader.close()
 	return 0
-
-
-def main() -> int:
-	args = _build_arg_parser().parse_args()
-	return main_with_args(args)
 
 
 if __name__ == "__main__":

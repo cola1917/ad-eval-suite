@@ -7,7 +7,7 @@ coordinate lists suitable for matplotlib rendering.
 
 Usage::
 
-    from visualization.map_overlay import load_map_geometry, query_map_patch, draw_map_overlay
+    from scenario.map_overlay import load_map_geometry, query_map_patch, draw_map_overlay
 
     map_data = load_map_geometry("data/nuscenes-mini", "singapore-onenorth")
     patch   = query_map_patch(map_data, cx=620.0, cy=1180.0, half_extent=60.0)

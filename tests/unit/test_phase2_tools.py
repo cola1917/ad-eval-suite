@@ -9,9 +9,9 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from PIL import Image
 
-from visualization.map_overlay import draw_map_overlay, load_map_geometry, query_map_patch
-from simulation.export_openscenario import export_snapshot_to_xosc
-from visualization.replay_scene import _load_scene, _match_sets, export_scene_frames, export_scene_gif
+from scenario.map_overlay import draw_map_overlay, load_map_geometry, query_map_patch
+from simulator_export.export_openscenario import export_snapshot_to_xosc
+from tools.replay_scene import _load_scene, _match_sets, export_scene_frames, export_scene_gif
 
 
 def _snapshot_payload() -> dict:

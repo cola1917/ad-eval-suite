@@ -17,13 +17,13 @@ from matplotlib import animation
 from tqdm.auto import tqdm
 
 try:
-	from visualization.map_overlay import draw_map_overlay, load_map_geometry, query_map_patch
+	from scenario.map_overlay import draw_map_overlay, load_map_geometry, query_map_patch
 except ImportError:  # pragma: no cover
 	import sys
 	workspace_root = Path(__file__).resolve().parents[1]
 	if str(workspace_root) not in sys.path:
 		sys.path.insert(0, str(workspace_root))
-	from visualization.map_overlay import draw_map_overlay, load_map_geometry, query_map_patch
+	from scenario.map_overlay import draw_map_overlay, load_map_geometry, query_map_patch
 
 
 def _rotation_corners(x: float, y: float, w: float, l: float, yaw: float) -> List[Tuple[float, float]]:
