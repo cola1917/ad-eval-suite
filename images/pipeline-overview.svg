@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="360" viewBox="0 0 1400 360">
+  <defs>
+    <style>
+      .title { font: 700 28px 'Segoe UI', Arial, sans-serif; fill: #0f172a; }
+      .label { font: 600 18px 'Segoe UI', Arial, sans-serif; fill: #0f172a; }
+      .desc { font: 400 14px 'Segoe UI', Arial, sans-serif; fill: #334155; }
+      .small { font: 600 13px 'Segoe UI', Arial, sans-serif; fill: #0f172a; }
+    </style>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#64748b" />
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="1400" height="360" fill="#f8fafc" />
+  <text x="40" y="50" class="title">AD Eval Pipeline: Evaluate -> Mine -> Visualize -> Simulate</text>
+
+  <rect x="40" y="90" rx="14" ry="14" width="300" height="180" fill="#dbeafe" stroke="#60a5fa" stroke-width="2"/>
+  <text x="60" y="130" class="label">1. Evaluate</text>
+  <text x="60" y="160" class="desc">detection + tracking metrics</text>
+  <text x="60" y="184" class="desc">mAP, Precision, Recall, MOTA, IDF1</text>
+  <text x="60" y="222" class="small">output: report.json / report.md</text>
+
+  <rect x="380" y="90" rx="14" ry="14" width="300" height="180" fill="#dcfce7" stroke="#4ade80" stroke-width="2"/>
+  <text x="400" y="130" class="label">2. Mine</text>
+  <text x="400" y="160" class="desc">rank worst scenes and frames</text>
+  <text x="400" y="184" class="desc">weighted error score</text>
+  <text x="400" y="222" class="small">output: snapshots + top-k lists</text>
+
+  <rect x="720" y="90" rx="14" ry="14" width="300" height="180" fill="#fef3c7" stroke="#f59e0b" stroke-width="2"/>
+  <text x="740" y="130" class="label">3. Visualize</text>
+  <text x="740" y="160" class="desc">BEV replay frames / GIF export</text>
+  <text x="740" y="184" class="desc">optional map overlay</text>
+  <text x="740" y="222" class="small">output: PNG / GIF evidence</text>
+
+  <rect x="1060" y="90" rx="14" ry="14" width="300" height="180" fill="#fee2e2" stroke="#f87171" stroke-width="2"/>
+  <text x="1080" y="130" class="label">4. Simulate</text>
+  <text x="1080" y="160" class="desc">export OpenSCENARIO (.xosc)</text>
+  <text x="1080" y="184" class="desc">validate + esmini smoke</text>
+  <text x="1080" y="222" class="small">output: simulation-ready cases</text>
+
+  <line x1="340" y1="180" x2="372" y2="180" stroke="#64748b" stroke-width="3" marker-end="url(#arrow)"/>
+  <line x1="680" y1="180" x2="712" y2="180" stroke="#64748b" stroke-width="3" marker-end="url(#arrow)"/>
+  <line x1="1020" y1="180" x2="1052" y2="180" stroke="#64748b" stroke-width="3" marker-end="url(#arrow)"/>
+
+  <text x="40" y="320" class="desc">CLI entry: scripts/adeval.py  |  Core modules: eval/, mining/, visualization/, simulation/</text>
+</svg>

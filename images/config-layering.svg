@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="560" viewBox="0 0 1200 560">
+  <defs>
+    <style>
+      .title { font: 700 28px 'Segoe UI', Arial, sans-serif; fill: #0f172a; }
+      .label { font: 700 20px 'Segoe UI', Arial, sans-serif; fill: #0f172a; }
+      .item  { font: 500 15px 'Segoe UI', Arial, sans-serif; fill: #334155; }
+      .foot  { font: 500 14px 'Segoe UI', Arial, sans-serif; fill: #475569; }
+    </style>
+    <marker id="arr" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#64748b" />
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="1200" height="560" fill="#f8fafc"/>
+  <text x="40" y="54" class="title">Config Layering: dataset.yaml + eval.yaml + sim.yaml</text>
+
+  <rect x="60" y="100" rx="14" ry="14" width="320" height="300" fill="#dbeafe" stroke="#60a5fa" stroke-width="2"/>
+  <text x="84" y="140" class="label">configs/dataset.yaml</text>
+  <text x="84" y="176" class="item">- dataset registry</text>
+  <text x="84" y="202" class="item">- active dataset selection</text>
+  <text x="84" y="228" class="item">- category schema mapping</text>
+  <text x="84" y="278" class="item">feeds data loading and remap</text>
+
+  <rect x="440" y="100" rx="14" ry="14" width="320" height="300" fill="#dcfce7" stroke="#4ade80" stroke-width="2"/>
+  <text x="464" y="140" class="label">configs/eval.yaml</text>
+  <text x="464" y="176" class="item">- strategy defaults (matcher, IoU)</text>
+  <text x="464" y="202" class="item">- metrics level</text>
+  <text x="464" y="228" class="item">- mining weights and top-k</text>
+  <text x="464" y="254" class="item">- synthetic generator params</text>
+  <text x="464" y="304" class="item">drives eval + mining behavior</text>
+
+  <rect x="820" y="100" rx="14" ry="14" width="320" height="300" fill="#fee2e2" stroke="#f87171" stroke-width="2"/>
+  <text x="844" y="140" class="label">configs/sim.yaml</text>
+  <text x="844" y="176" class="item">- xosc export defaults</text>
+  <text x="844" y="202" class="item">- validation defaults</text>
+  <text x="844" y="228" class="item">- esmini smoke defaults</text>
+  <text x="844" y="278" class="item">controls sim handoff and checks</text>
+
+  <line x1="380" y1="250" x2="432" y2="250" stroke="#64748b" stroke-width="3" marker-end="url(#arr)"/>
+  <line x1="760" y1="250" x2="812" y2="250" stroke="#64748b" stroke-width="3" marker-end="url(#arr)"/>
+
+  <rect x="60" y="438" rx="10" ry="10" width="1080" height="74" fill="#e2e8f0" stroke="#94a3b8"/>
+  <text x="84" y="470" class="foot">Benefit: separate data concerns, evaluation strategy, and simulation policy; easier tuning and safer change isolation.</text>
+  <text x="84" y="494" class="foot">Recommended usage: keep stable defaults in YAML, and only override from CLI for temporary experiments.</text>
+</svg>
