@@ -11,8 +11,12 @@ try:
 	from datasets.nuscenes_loader import NuScenesLoader
 	from eval.perception.detection_eval import evaluate_detection_frames
 	from eval.perception.tracking_eval import evaluate_tracking_frames
+	from failure_mining.pipeline import FailureMiningConfig, run_failure_mining
+	from failure_mining.rank_frames import FailureScoreWeights
 	from generators.detection_generator import DetectionGenerator, DetectionGeneratorConfig
 	from matching.iou_matching import set_bev_iou_mode
+	from simulator_export.export_openscenario import export_snapshot_to_xosc
+	from tools.replay_scene import export_scene_frames
 	from utils.category_remap import CategoryRemapper
 except ImportError:  # pragma: no cover
 	workspace_root = Path(__file__).resolve().parents[1]
@@ -21,8 +25,12 @@ except ImportError:  # pragma: no cover
 	from datasets.nuscenes_loader import NuScenesLoader
 	from eval.perception.detection_eval import evaluate_detection_frames
 	from eval.perception.tracking_eval import evaluate_tracking_frames
+	from failure_mining.pipeline import FailureMiningConfig, run_failure_mining
+	from failure_mining.rank_frames import FailureScoreWeights
 	from generators.detection_generator import DetectionGenerator, DetectionGeneratorConfig
 	from matching.iou_matching import set_bev_iou_mode
+	from simulator_export.export_openscenario import export_snapshot_to_xosc
+	from tools.replay_scene import export_scene_frames
 	from utils.category_remap import CategoryRemapper
 
 
@@ -82,6 +90,17 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 	parser.add_argument("--topn-per-scenario", type=int, default=1, help="Top-N per scenario")
 	parser.add_argument("--output-dir", default="outputs/perception", help="Root output directory")
 	parser.add_argument("--run-name", default=None, help="Optional run name for output folder")
+	parser.add_argument("--failure-topk-scenes", type=int, default=3, help="Top-K worst scenes for failure mining")
+	parser.add_argument("--failure-topk-frames", type=int, default=10, help="Top-K worst frames for failure mining")
+	parser.add_argument("--failure-w-fn", type=float, default=1.0, help="Failure score weight for FN")
+	parser.add_argument("--failure-w-fp", type=float, default=0.5, help="Failure score weight for FP")
+	parser.add_argument("--failure-w-map", type=float, default=2.0, help="Failure score weight for (1 - mAP/F1 term)")
+	parser.add_argument("--failure-w-idsw", type=float, default=1.0, help="Failure score weight for ID switches")
+	parser.add_argument("--export-replay", action="store_true", help="Export replay frame images for failure-mined snapshots")
+	parser.add_argument("--replay-show-trajectories", action="store_true", help="Overlay trajectories in exported replay images")
+	parser.add_argument("--export-xosc", action="store_true", help="Export OpenSCENARIO files for failure-mined snapshots")
+	parser.add_argument("--xosc-map-file", default="", help="Optional OpenDRIVE map path for exported OpenSCENARIO files")
+	parser.add_argument("--xosc-scene-graph-file", default="", help="Optional scene graph path for exported OpenSCENARIO files")
 
 	parser.add_argument(
 		"--center-distance-threshold", type=float, default=None,
@@ -107,6 +126,49 @@ def _build_run_paths(output_dir: str, run_name: str | None) -> Dict[str, Path]:
 		"viz_dir": viz_dir,
 		"report_json": report_json,
 		"report_md": report_md,
+	}
+
+
+def _load_json_file(path: str) -> Dict[str, Any]:
+	return json.loads(Path(path).read_text(encoding="utf-8"))
+
+
+def _export_failure_mining_artifacts(
+	*,
+	run_dir: Path,
+	failure_mining: Dict[str, Any],
+	export_replay: bool,
+	replay_show_trajectories: bool,
+	export_xosc: bool,
+	xosc_map_file: str,
+	xosc_scene_graph_file: str,
+) -> Dict[str, Any]:
+	replay_outputs: List[Dict[str, Any]] = []
+	xosc_outputs: List[str] = []
+	for snapshot_file in failure_mining.get("snapshot_files", []):
+		snapshot_payload = _load_json_file(snapshot_file)
+		scene_id = str(snapshot_payload.get("scene_id", Path(snapshot_file).stem))
+		if export_replay:
+			replay_dir = run_dir / "failure_mining" / "replay" / scene_id
+			images = export_scene_frames(
+				snapshot_payload=snapshot_payload,
+				output_dir=str(replay_dir),
+				show_trajectories=replay_show_trajectories,
+			)
+			replay_outputs.append({"scene_id": scene_id, "image_files": images})
+		if export_xosc:
+			xosc_path = run_dir / "failure_mining" / "xosc" / f"{scene_id}.xosc"
+			xosc_outputs.append(
+				export_snapshot_to_xosc(
+					snapshot_payload=snapshot_payload,
+					output_path=str(xosc_path),
+					map_file=xosc_map_file,
+					scene_graph_file=xosc_scene_graph_file,
+				)
+			)
+	return {
+		"replay_exports": replay_outputs,
+		"xosc_exports": xosc_outputs,
 	}
 
 
@@ -501,6 +563,36 @@ def main() -> int:
 		"detection": result,
 		"tracking": tracking_result,
 	}
+	failure_mining = run_failure_mining(
+		run_dir=paths["run_dir"],
+		frame_records=frame_records,
+		prediction_records=prediction_records,
+		iou_threshold=resolved_det_iou,
+		matcher=resolved_matcher,
+		class_aware=True,
+		config=FailureMiningConfig(
+			top_k_scenes=max(0, int(args.failure_topk_scenes)),
+			top_k_frames=max(0, int(args.failure_topk_frames)),
+			weights=FailureScoreWeights(
+				w_fn=float(args.failure_w_fn),
+				w_fp=float(args.failure_w_fp),
+				w_map=float(args.failure_w_map),
+				w_idsw=float(args.failure_w_idsw),
+			),
+			coordinate_system="nuscenes_global",
+		),
+	)
+	full_result["failure_mining"] = failure_mining
+	artifact_exports = _export_failure_mining_artifacts(
+		run_dir=paths["run_dir"],
+		failure_mining=failure_mining,
+		export_replay=bool(args.export_replay),
+		replay_show_trajectories=bool(args.replay_show_trajectories),
+		export_xosc=bool(args.export_xosc),
+		xosc_map_file=str(args.xosc_map_file),
+		xosc_scene_graph_file=str(args.xosc_scene_graph_file),
+	)
+	full_result["failure_mining"].update(artifact_exports)
 	full_result["config"] = {
 		"dataset_name": dataset_name,
 		"dataset": resolved_version,
@@ -562,6 +654,13 @@ def main() -> int:
 	)
 	print(f"[run] report(json): {paths['report_json']}")
 	print(f"[run] report(md): {paths['report_md']}")
+	if failure_mining.get("enabled"):
+		print(f"[run] failure mining scenes: {failure_mining.get('top_k_scenes_path')}")
+		print(f"[run] failure mining frames: {failure_mining.get('top_k_frames_path')}")
+		if artifact_exports.get("replay_exports"):
+			print(f"[run] replay exports: {len(artifact_exports['replay_exports'])} scenes")
+		if artifact_exports.get("xosc_exports"):
+			print(f"[run] xosc exports: {len(artifact_exports['xosc_exports'])} scenes")
 	if result.get("topn_manifest_path"):
 		print(f"[run] topn manifest: {result['topn_manifest_path']}")
 
