@@ -16,7 +16,7 @@ try:
 	from generators.detection_generator import DetectionGenerator, DetectionGeneratorConfig
 	from matching.iou_matching import set_bev_iou_mode
 	from simulator_export.export_openscenario import export_snapshot_to_xosc
-	from tools.replay_scene import export_scene_frames
+	from tools.replay_scene import export_scene_frames, export_scene_gif
 	from utils.category_remap import CategoryRemapper
 except ImportError:  # pragma: no cover
 	workspace_root = Path(__file__).resolve().parents[1]
@@ -30,7 +30,7 @@ except ImportError:  # pragma: no cover
 	from generators.detection_generator import DetectionGenerator, DetectionGeneratorConfig
 	from matching.iou_matching import set_bev_iou_mode
 	from simulator_export.export_openscenario import export_snapshot_to_xosc
-	from tools.replay_scene import export_scene_frames
+	from tools.replay_scene import export_scene_frames, export_scene_gif
 	from utils.category_remap import CategoryRemapper
 
 
@@ -97,7 +97,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 	parser.add_argument("--failure-w-map", type=float, default=2.0, help="Failure score weight for (1 - mAP/F1 term)")
 	parser.add_argument("--failure-w-idsw", type=float, default=1.0, help="Failure score weight for ID switches")
 	parser.add_argument("--export-replay", action="store_true", help="Export replay frame images for failure-mined snapshots")
+	parser.add_argument("--export-replay-gif", action="store_true", help="Export animated replay GIF for each failure-mined scene")
+	parser.add_argument("--replay-gif-fps", type=int, default=3, help="Replay GIF frame rate (frames per second)")
 	parser.add_argument("--replay-show-trajectories", action="store_true", help="Overlay trajectories in exported replay images")
+	parser.add_argument("--overlay-map", action="store_true", help="Overlay lane lines and drivable area on replay outputs (requires nuScenes map expansion JSONs)")
+	parser.add_argument("--map-data-root", default="data/nuscenes-mini", help="nuScenes data root used for map overlay (must contain maps/expansion/)")
 	parser.add_argument("--export-xosc", action="store_true", help="Export OpenSCENARIO files for failure-mined snapshots")
 	parser.add_argument("--xosc-map-file", default="", help="Optional OpenDRIVE map path for exported OpenSCENARIO files")
 	parser.add_argument("--xosc-scene-graph-file", default="", help="Optional scene graph path for exported OpenSCENARIO files")
@@ -138,13 +142,19 @@ def _export_failure_mining_artifacts(
 	run_dir: Path,
 	failure_mining: Dict[str, Any],
 	export_replay: bool,
+	export_replay_gif: bool,
+	replay_gif_fps: int,
 	replay_show_trajectories: bool,
+	overlay_map: bool,
+	map_data_root: str,
 	export_xosc: bool,
 	xosc_map_file: str,
 	xosc_scene_graph_file: str,
 ) -> Dict[str, Any]:
 	replay_outputs: List[Dict[str, Any]] = []
+	replay_gif_outputs: List[Dict[str, Any]] = []
 	xosc_outputs: List[str] = []
+	map_root: str | None = map_data_root if overlay_map else None
 	for snapshot_file in failure_mining.get("snapshot_files", []):
 		snapshot_payload = _load_json_file(snapshot_file)
 		scene_id = str(snapshot_payload.get("scene_id", Path(snapshot_file).stem))
@@ -154,8 +164,19 @@ def _export_failure_mining_artifacts(
 				snapshot_payload=snapshot_payload,
 				output_dir=str(replay_dir),
 				show_trajectories=replay_show_trajectories,
+				map_data_root=map_root,
 			)
 			replay_outputs.append({"scene_id": scene_id, "image_files": images})
+		if export_replay_gif:
+			replay_gif_path = run_dir / "failure_mining" / "replay_gif" / f"{scene_id}.gif"
+			gif_path = export_scene_gif(
+				snapshot_payload=snapshot_payload,
+				output_file=str(replay_gif_path),
+				show_trajectories=replay_show_trajectories,
+				fps=max(1, int(replay_gif_fps)),
+				map_data_root=map_root,
+			)
+			replay_gif_outputs.append({"scene_id": scene_id, "gif_file": gif_path})
 		if export_xosc:
 			xosc_path = run_dir / "failure_mining" / "xosc" / f"{scene_id}.xosc"
 			xosc_outputs.append(
@@ -168,6 +189,7 @@ def _export_failure_mining_artifacts(
 			)
 	return {
 		"replay_exports": replay_outputs,
+		"replay_gif_exports": replay_gif_outputs,
 		"xosc_exports": xosc_outputs,
 	}
 
@@ -587,7 +609,11 @@ def main() -> int:
 		run_dir=paths["run_dir"],
 		failure_mining=failure_mining,
 		export_replay=bool(args.export_replay),
+		export_replay_gif=bool(args.export_replay_gif),
+		replay_gif_fps=max(1, int(args.replay_gif_fps)),
 		replay_show_trajectories=bool(args.replay_show_trajectories),
+		overlay_map=bool(args.overlay_map),
+		map_data_root=str(args.map_data_root),
 		export_xosc=bool(args.export_xosc),
 		xosc_map_file=str(args.xosc_map_file),
 		xosc_scene_graph_file=str(args.xosc_scene_graph_file),
