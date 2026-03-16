@@ -57,47 +57,58 @@
 - GIF 导出
 - 可选 nuScenes 地图覆盖（车道线、可行驶区域）
 
-## 统一 CLI（推荐入口）
+## 运行方式（当前代码基线）
 
-主入口：`scripts/adeval.py`
+当前主入口为：`scripts/run_perception_eval.py`
 
 ```bash
-# 查看全部命令
-python scripts/adeval.py --help
+# 查看参数
+python scripts/run_perception_eval.py --help
 
-# 1) 全流程感知评测
-python scripts/adeval.py eval
+# 1) 默认配置运行（读取 configs/dataset.yaml + configs/eval.yaml）
+python scripts/run_perception_eval.py
 
-# 2) 指定策略 + 子集场景 + 导出产物
-python scripts/adeval.py eval \
-    --strategy l2_planning \
+# 2) 指定评测策略
+python scripts/run_perception_eval.py --strategy detection_10cls
+python scripts/run_perception_eval.py --strategy l2_planning
+
+# 3) 场景与帧范围控制
+python scripts/run_perception_eval.py --scenes first --max-frames full
+python scripts/run_perception_eval.py --scenes full --max-frames full
+
+# 4) generator profile 切换（good / baseline / bad）
+python scripts/run_perception_eval.py --generator-profile good
+python scripts/run_perception_eval.py --generator-profile bad
+
+# 5) profile 基础上再用 CLI 精调（CLI 优先）
+python scripts/run_perception_eval.py \
+    --generator-profile good \
+    --drop-rate 0.02 \
+    --fp-rate 0.04
+
+# 6) 导出失败场景 GIF（可选）
+python scripts/run_perception_eval.py \
+    --generator-profile good \
     --scenes first \
-    --export-gif \
-    --map \
-    --export-sim \
-    --run-name demo_l2
+    --max-frames full \
+    --export-replay-gif \
+    --run-name good_fullframes_gif
 
-# 3) 基于历史 run 再导出挖掘产物
-python scripts/adeval.py mine outputs/perception/demo_l2 --export-gif --export-sim
-
-# 4) 校验 OpenSCENARIO
-python scripts/adeval.py sim validate outputs/perception/demo_l2/failure_mining/xosc
-
-# 5) esmini smoke
-python scripts/adeval.py sim smoke outputs/perception/demo_l2/failure_mining/xosc --dry-run
-
-# 6) 直接回放 snapshot
-python scripts/adeval.py viz replay outputs/perception/demo_l2/failure_mining/snapshots/scene-0061_snapshot.json \
-    --save-gif /tmp/scene-0061.gif --map
+# 7) 回放默认行为
+# - 默认开启地图覆盖（车道线、可行驶区域）
+# - 默认固定视角（ego_fixed）以保持帧尺度一致
+# 如需关闭地图层或切回自动视角：
+python scripts/run_perception_eval.py \
+    --export-replay-gif \
+    --no-overlay-map \
+    --replay-view-mode auto
 ```
-
-兼容说明：`scripts/run_perception_eval.py` 仍保留，方便已有脚本和 CI 继续使用。
 
 ## 配置架构
 
 ![配置分层图](images/config-layering.svg)
 
-配置按“数据 / 评测 / 仿真”解耦：
+配置按“数据 / 评测策略”解耦：
 
 - `configs/dataset.yaml`
     - 数据集注册
@@ -106,12 +117,8 @@ python scripts/adeval.py viz replay outputs/perception/demo_l2/failure_mining/sn
 - `configs/eval.yaml`
     - 策略默认参数（matcher、IoU、metrics level）
     - perception/prediction/planning 设置
-    - mining 权重与 top-k 设置
-    - synthetic generator 设置
-- `configs/sim.yaml`
-    - 仿真导出默认设置
-    - xosc 校验默认设置
-    - esmini smoke 默认设置
+    - synthetic generator base 参数
+    - `generator_profiles`（good / baseline / bad）
 
 ## 快速运行
 
@@ -141,7 +148,7 @@ data/nuscenes-mini/
 ### 3. 首次运行
 
 ```bash
-python scripts/adeval.py eval --run-name first_run
+python scripts/run_perception_eval.py --run-name first_run
 ```
 
 输出目录：

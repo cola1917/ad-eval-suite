@@ -96,3 +96,37 @@ prediction:
     - ade
     - fde
     - miss_rate
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Synthetic prediction generator settings
+#
+# Final params are resolved as:
+#   generator (base) + generator_profiles[active_or_cli_profile] + CLI overrides
+# ─────────────────────────────────────────────────────────────────────────────
+generator:
+  drop_rate: 0.10
+  fp_rate: 0.15
+  translation_noise_std: 0.35
+  size_noise_std: 0.08
+  yaw_noise_std: 0.05
+
+active_generator_profile: baseline
+generator_profiles:
+  good:
+    drop_rate: 0.03
+    fp_rate: 0.05
+    translation_noise_std: 0.12
+    size_noise_std: 0.03
+    yaw_noise_std: 0.02
+  baseline:
+    drop_rate: 0.10
+    fp_rate: 0.15
+    translation_noise_std: 0.35
+    size_noise_std: 0.08
+    yaw_noise_std: 0.05
+  bad:
+    drop_rate: 0.22
+    fp_rate: 0.30
+    translation_noise_std: 0.80
+    size_noise_std: 0.18
+    yaw_noise_std: 0.12

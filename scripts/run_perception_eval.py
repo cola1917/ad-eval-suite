@@ -76,14 +76,20 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 		help="Eval strategy name from eval.yaml (raw | detection_10cls | l2_planning). "
 		     "Omit to use active_strategy from eval.yaml.",
 	)
+	parser.add_argument(
+		"--generator-profile",
+		default=None,
+		help="Generator profile name from eval.yaml (e.g. good | baseline | bad). "
+		     "Omit to use active_generator_profile.",
+	)
 
 	# Synthetic prediction controls.
 	parser.add_argument("--seed", type=int, default=42, help="Generator random seed")
-	parser.add_argument("--drop-rate", type=float, default=0.1, help="GT drop probability")
-	parser.add_argument("--fp-rate", type=float, default=0.15, help="False positive rate")
-	parser.add_argument("--translation-noise-std", type=float, default=0.35, help="Center noise std")
-	parser.add_argument("--size-noise-std", type=float, default=0.08, help="Size noise std")
-	parser.add_argument("--yaw-noise-std", type=float, default=0.05, help="Yaw noise std")
+	parser.add_argument("--drop-rate", type=float, default=None, help="GT drop probability (overrides profile/config)")
+	parser.add_argument("--fp-rate", type=float, default=None, help="False positive rate (overrides profile/config)")
+	parser.add_argument("--translation-noise-std", type=float, default=None, help="Center noise std (overrides profile/config)")
+	parser.add_argument("--size-noise-std", type=float, default=None, help="Size noise std (overrides profile/config)")
+	parser.add_argument("--yaw-noise-std", type=float, default=None, help="Yaw noise std (overrides profile/config)")
 
 	# Visualization and report options.
 	parser.add_argument("--topn", type=int, default=3, help="Global top-N badcase visualizations")
@@ -100,14 +106,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 	parser.add_argument("--export-replay-gif", action="store_true", help="Export animated replay GIF for each failure-mined scene")
 	parser.add_argument("--replay-gif-fps", type=int, default=3, help="Replay GIF frame rate (frames per second)")
 	parser.add_argument("--replay-show-trajectories", action="store_true", help="Overlay trajectories in exported replay images")
-	parser.add_argument("--replay-view-mode", choices=["auto", "ego_fixed"], default="auto", help="Replay viewport mode: auto bounds or fixed ego-centric window")
+	parser.add_argument("--replay-view-mode", choices=["auto", "ego_fixed"], default="ego_fixed", help="Replay viewport mode: auto bounds or fixed ego-centric window")
 	parser.add_argument("--replay-view-half-extent", type=float, default=60.0, help="Half extent (m) for ego_fixed replay view mode")
 	parser.add_argument("--replay-dpi", type=int, default=150, help="Replay PNG/GIF output DPI")
-	parser.add_argument("--overlay-map", action="store_true", help="Overlay lane lines and drivable area on replay outputs (requires nuScenes map expansion JSONs)")
+	parser.add_argument("--overlay-map", dest="overlay_map", action="store_true", help="Overlay lane lines and drivable area on replay outputs (enabled by default)")
+	parser.add_argument("--no-overlay-map", dest="overlay_map", action="store_false", help="Disable map overlay on replay outputs")
 	parser.add_argument("--map-data-root", default="data/nuscenes-mini", help="nuScenes data root used for map overlay (must contain maps/expansion/)")
 	parser.add_argument("--export-xosc", action="store_true", help="Export OpenSCENARIO files for failure-mined snapshots")
 	parser.add_argument("--xosc-map-file", default="", help="Optional OpenDRIVE map path for exported OpenSCENARIO files")
 	parser.add_argument("--xosc-scene-graph-file", default="", help="Optional scene graph path for exported OpenSCENARIO files")
+	parser.set_defaults(overlay_map=True)
 
 	parser.add_argument(
 		"--center-distance-threshold", type=float, default=None,
@@ -466,6 +474,17 @@ def _resolve_strategy_params(eval_cfg: Dict[str, Any], strategy_name: str | None
 	return resolved_strategy, params
 
 
+def _resolve_generator_params(eval_cfg: Dict[str, Any], profile_name: str | None) -> Tuple[str, Dict[str, Any]]:
+	"""Resolve generator params from eval.yaml base + named profile."""
+	base = dict(eval_cfg.get("generator", {}) or {})
+	profiles = eval_cfg.get("generator_profiles", {}) or {}
+	active_profile = str(eval_cfg.get("active_generator_profile", "baseline"))
+	resolved_profile = str(profile_name or active_profile)
+	profile_cfg = dict(profiles.get(resolved_profile, {}) or {})
+	merged = {**base, **profile_cfg}
+	return resolved_profile, merged
+
+
 def _parse_max_frames(raw_value: Any) -> int | None:
 	if raw_value is None:
 		return None
@@ -517,6 +536,7 @@ def main() -> int:
 	# 2) Resolve dataset and strategy defaults.
 	dataset_name, dataset_entry = _resolve_dataset_entry(dataset_cfg, args.dataset_name)
 	strategy_name, strategy_params = _resolve_strategy_params(eval_cfg, args.strategy)
+	generator_profile_name, generator_params = _resolve_generator_params(eval_cfg, args.generator_profile)
 
 	# 3) CLI overrides (temporary experiments).
 	resolved_data_root = args.dataset_path or args.data_root or dataset_entry.get("root", "data/nuscenes-mini")
@@ -531,6 +551,23 @@ def main() -> int:
 		else strategy_params.get("center_distance_threshold")
 	)
 	resolved_metrics_level = args.metrics or strategy_params.get("metrics_level", "standard")
+	resolved_drop_rate = args.drop_rate if args.drop_rate is not None else float(generator_params.get("drop_rate", 0.10))
+	resolved_fp_rate = args.fp_rate if args.fp_rate is not None else float(generator_params.get("fp_rate", 0.15))
+	resolved_translation_noise = (
+		args.translation_noise_std
+		if args.translation_noise_std is not None
+		else float(generator_params.get("translation_noise_std", 0.35))
+	)
+	resolved_size_noise = (
+		args.size_noise_std
+		if args.size_noise_std is not None
+		else float(generator_params.get("size_noise_std", 0.08))
+	)
+	resolved_yaw_noise = (
+		args.yaw_noise_std
+		if args.yaw_noise_std is not None
+		else float(generator_params.get("yaw_noise_std", 0.05))
+	)
 
 	configured_max_frames = strategy_params.get("max_frames")
 	cli_max_frames = _parse_max_frames(args.max_frames) if args.max_frames is not None else None
@@ -543,6 +580,11 @@ def main() -> int:
 	print(
 		f"[run] dataset={dataset_name!r} root={resolved_data_root} version={resolved_version} "
 		f"strategy={strategy_name!r} schema={schema_name} target_classes={remapper.target_classes or '(raw)'}"
+	)
+	print(
+		f"[run] generator_profile={generator_profile_name!r} "
+		f"drop={resolved_drop_rate:.3f} fp={resolved_fp_rate:.3f} "
+		f"trans_noise={resolved_translation_noise:.3f} size_noise={resolved_size_noise:.3f} yaw_noise={resolved_yaw_noise:.3f}"
 	)
 
 	loader = NuScenesLoader(data_root=resolved_data_root, version=resolved_version, verbose=False)
@@ -559,11 +601,11 @@ def main() -> int:
 	print(f"[run] loaded frames={len(raw_frame_records)}  scenes={len(covered_scenes)}  sample={covered_scenes[:3]}")
 
 	generator_config = DetectionGeneratorConfig(
-		translation_noise_std=args.translation_noise_std,
-		size_noise_std=args.size_noise_std,
-		yaw_noise_std=args.yaw_noise_std,
-		drop_rate=args.drop_rate,
-		fp_rate=args.fp_rate,
+		translation_noise_std=resolved_translation_noise,
+		size_noise_std=resolved_size_noise,
+		yaw_noise_std=resolved_yaw_noise,
+		drop_rate=resolved_drop_rate,
+		fp_rate=resolved_fp_rate,
 	)
 	generator = DetectionGenerator(config=generator_config, seed=args.seed)
 	raw_prediction_records = [generator.generate_frame_predictions(f) for f in raw_frame_records]
@@ -652,12 +694,13 @@ def main() -> int:
 		"bev_iou_mode": resolved_bev_iou_mode,
 		"center_distance_threshold": resolved_center_distance,
 		"seed": args.seed,
+		"generator_profile": generator_profile_name,
 		"generator": {
-			"translation_noise_std": args.translation_noise_std,
-			"size_noise_std": args.size_noise_std,
-			"yaw_noise_std": args.yaw_noise_std,
-			"drop_rate": args.drop_rate,
-			"fp_rate": args.fp_rate,
+			"translation_noise_std": resolved_translation_noise,
+			"size_noise_std": resolved_size_noise,
+			"yaw_noise_std": resolved_yaw_noise,
+			"drop_rate": resolved_drop_rate,
+			"fp_rate": resolved_fp_rate,
 		},
 	}
 
