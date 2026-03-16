@@ -24,6 +24,7 @@ def _build_parser() -> argparse.ArgumentParser:
 	parser.add_argument("--esmini-bin", default="esmini", help="esmini executable path")
 	parser.add_argument("--timeout-sec", type=float, default=60.0, help="Per-file timeout seconds")
 	parser.add_argument("--extra-arg", action="append", default=[], help="Extra esmini arg (repeatable)")
+	parser.add_argument("--treat-timeout-as-pass", action="store_true", help="Mark timeout as pass (useful for long-running scenarios)")
 	parser.add_argument("--dry-run", action="store_true", help="Print commands without running them")
 	parser.add_argument("--report", default=None, help="Optional JSON report output path")
 	return parser
@@ -35,6 +36,7 @@ def _run_one(
 	xosc_file: Path,
 	timeout_sec: float,
 	extra_args: List[str],
+	treat_timeout_as_pass: bool,
 	dry_run: bool,
 ) -> Dict[str, Any]:
 	cmd = [esmini_bin, "--osc", str(xosc_file), "--headless", *extra_args]
@@ -66,6 +68,7 @@ def _run_one(
 	except subprocess.TimeoutExpired as exc:
 		row["timeout"] = True
 		row["stderr"] = f"timeout after {timeout_sec}s: {exc}"
+		row["ok"] = bool(treat_timeout_as_pass)
 
 	return row
 
@@ -91,6 +94,7 @@ def main() -> int:
 			xosc_file=path,
 			timeout_sec=float(args.timeout_sec),
 			extra_args=list(args.extra_arg),
+			treat_timeout_as_pass=bool(args.treat_timeout_as_pass),
 			dry_run=bool(args.dry_run),
 		)
 		rows.append(row)
