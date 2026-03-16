@@ -96,3 +96,25 @@ prediction:
     - ade
     - fde
     - miss_rate
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Failure mining settings  (used by `adeval mine` and the integrated eval run)
+  # ─────────────────────────────────────────────────────────────────────────────
+  mining:
+    top_k_scenes: 3           # worst scenes to surface
+    top_k_frames: 10          # worst frames per worst scene
+    weights:
+      fn:   1.0               # false-negative penalty
+      fp:   0.5               # false-positive penalty
+      map:  2.0               # mAP degradation penalty
+      idsw: 1.0               # ID-switch penalty
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Synthetic-prediction generator settings  (used when no real model is plugged in)
+  # ─────────────────────────────────────────────────────────────────────────────
+  generator:
+    drop_rate:              0.10   # probability of dropping a GT box
+    fp_rate:                0.15   # false-positive injection rate
+    translation_noise_std:  0.35   # centre position noise (metres)
+    size_noise_std:         0.08   # size perturbation (relative)
+    yaw_noise_std:          0.05   # heading noise (radians)

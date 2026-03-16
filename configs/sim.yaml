@@ -1,0 +1,22 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Simulation export and validation configuration
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── OpenSCENARIO export ────────────────────────────────────────────────────────
+export:
+  output_dir: outputs/sim             # default xosc output directory
+  format: xosc                        # only xosc supported currently
+  coordinate_system: nuscenes_global  # coordinate frame written into exported files
+
+# ── XML / XSD validation ──────────────────────────────────────────────────────
+validation:
+  xsd_path: null          # path to OpenSCENARIO XSD schema; null = built-in checks only
+  fail_on_warn: false     # treat warnings as errors in CI
+  report_path: null       # if set, write JSON report here; null = stdout only
+
+# ── esmini smoke-test runner ──────────────────────────────────────────────────
+esmini:
+  bin: esmini             # esmini executable (path or name on PATH)
+  timeout_sec: 60         # per-scenario timeout in seconds
+  treat_timeout_as_pass: true   # long-running scenarios won't fail the suite
+  extra_args: []          # extra CLI arguments forwarded to esmini

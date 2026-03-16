@@ -5,10 +5,10 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Sequence
 
-from failure_mining.error_aggregation import aggregate_error_categories
-from failure_mining.rank_frames import FailureScoreWeights, rank_frames_and_scenes
-from failure_mining.rank_scenes import top_k_scenes
-from scenario.snapshot_schema import build_frame_snapshot, serialize_scene_snapshots
+from mining.error_aggregation import aggregate_error_categories
+from mining.rank_frames import FailureScoreWeights, rank_frames_and_scenes
+from mining.rank_scenes import top_k_scenes
+from visualization.snapshot_schema import build_frame_snapshot, serialize_scene_snapshots
 
 
 @dataclass(frozen=True)

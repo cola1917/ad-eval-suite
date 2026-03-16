@@ -1,272 +1,158 @@
 # ad-eval-suite
 
-An **Autonomous Driving Evaluation Suite** for benchmarking AD system components across a 4-stage pipeline: **Perception → Prediction → Planning → End-to-End**.
+Autonomous driving evaluation toolkit focused on practical iteration speed:
 
-Built on the [nuScenes](https://www.nuscenes.org/) mini dataset, it provides a modular Python evaluation framework with strategy-based configuration, class-aware matching, and interactive Jupyter notebooks covering every key metric.
+- evaluate perception quality (detection + tracking)
+- mine worst scenes and worst frames automatically
+- export replay visuals and OpenSCENARIO files for simulation handoff
+- validate and smoke-test `.xosc` scenarios
 
----
+## Feature Showcase
 
-## 4-Stage Evaluation Pipeline
+### Failure replay GIF (mined bad case)
 
-| Stage | Script | Key Metrics |
-|-------|--------|-------------|
-| 1. Perception | `scripts/run_perception_eval.py` | Precision, Recall, F1, mAP, MOTA, MOTP, IDF1, IDSW |
-| 2. Prediction | `scripts/run_prediction_eval.py` | ADE, FDE, minADE, minFDE, Miss Rate |
-| 3. Planning | `scripts/run_planning_eval.py` | Collision Rate, Jerk, Lane Violation, Route Completion |
-| 4. End-to-End | `scripts/run_e2e_eval.py` | Open/closed-loop driving behavior metrics |
+![Failure replay GIF](outputs/perception/gif_halfscenes_fullframes/failure_mining/replay_gif/scene-0061.gif)
 
----
+### Frame-level BEV replay with map overlay
 
-## Getting Started
+![Frame replay](outputs/perception/slider_scene0061_fullframes/failure_mining/replay/scene-0061/frame_0015.png)
 
-### GitHub Codespaces (zero-setup)
+## What This Project Delivers
 
-1. Click the green **Code** button → **Codespaces** tab → **Create codespace on main**.
-2. The environment builds automatically and installs all dependencies.
-3. Open `Metrics_Introduction.ipynb` to explore all metrics interactively.
+### 1) Evaluation module (`eval/`)
 
-### Local Setup
+- detection metrics: Precision / Recall / F1 / AP / mAP
+- tracking metrics: MOTA / MOTP / IDF1 / ID switches / MT / ML
+- strategy-driven execution using YAML (`raw`, `detection_10cls`, `l2_planning`)
+
+### 2) Mining module (`mining/`)
+
+- ranks worst scenes and frames by weighted error score
+- exports snapshot JSON payloads for reproducible debugging
+- supports replay + simulation export from mined snapshots
+
+### 3) Simulation module (`simulation/`)
+
+- snapshot to OpenSCENARIO (`.xosc`) export
+- XML/XSD validation pipeline
+- esmini headless smoke runner for fast scenario sanity checks
+
+### 4) Visualization module (`visualization/`)
+
+- top-down frame rendering
+- animated GIF generation
+- optional nuScenes map overlay (lane/drivable area)
+
+## Unified CLI (Final)
+
+Main entry: `scripts/adeval.py`
+
+```bash
+# See all commands
+python scripts/adeval.py --help
+
+# 1) Full perception evaluation
+python scripts/adeval.py eval
+
+# 2) Eval with strategy + subset scenes + artifact export
+python scripts/adeval.py eval \
+    --strategy l2_planning \
+    --scenes first \
+    --export-gif \
+    --map \
+    --export-sim \
+    --run-name demo_l2
+
+# 3) Re-export artifacts from an existing run
+python scripts/adeval.py mine outputs/perception/demo_l2 --export-gif --export-sim
+
+# 4) Validate OpenSCENARIO files
+python scripts/adeval.py sim validate outputs/perception/demo_l2/failure_mining/xosc
+
+# 5) Run esmini smoke tests
+python scripts/adeval.py sim smoke outputs/perception/demo_l2/failure_mining/xosc --dry-run
+
+# 6) Replay a snapshot directly
+python scripts/adeval.py viz replay outputs/perception/demo_l2/failure_mining/snapshots/scene-0061_snapshot.json --save-gif /tmp/scene-0061.gif --map
+```
+
+Compatibility note: `scripts/run_perception_eval.py` is kept for direct use and CI compatibility.
+
+## Config Architecture
+
+Three config files are now clearly separated by concern:
+
+- `configs/dataset.yaml`
+    - dataset registry
+    - active dataset
+    - category schema mapping
+- `configs/eval.yaml`
+    - strategy defaults (matcher, IoU, metrics level)
+    - perception/prediction/planning eval settings
+    - mining weights and top-k settings
+    - synthetic generator settings
+- `configs/sim.yaml`
+    - simulation export defaults
+    - `.xosc` validation defaults
+    - esmini smoke defaults
+
+This split keeps dataset, evaluation, and simulation concerns independent.
+
+## How To Run
+
+### 1) Environment
 
 ```bash
 git clone https://github.com/cola1917/ad-eval-suite.git
 cd ad-eval-suite
 
 python3 -m venv .venv
-source .venv/bin/activate       # Windows: .venv\Scripts\activate
-
+source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### nuScenes Mini Data
+### 2) Data
 
-The nuScenes mini split is expected at `data/nuscenes-mini/` with the standard layout:
+Place nuScenes mini under:
 
-```
+```text
 data/nuscenes-mini/
-├── maps/
-├── samples/
-├── sweeps/
-└── v1.0-mini/
+    maps/
+    samples/
+    sweeps/
+    v1.0-mini/
 ```
 
-Datasets and category schemas are configured in `configs/dataset.yaml`; evaluation strategies are configured in `configs/eval.yaml`.
-
----
-
-## Running Evaluations
-
-### Perception (Detection + Tracking)
+### 3) First run
 
 ```bash
-# Default: active dataset + active strategy from YAML
-python scripts/run_perception_eval.py
-
-# Choose dataset and strategy from YAML
-python scripts/run_perception_eval.py --dataset-name nuscenes_mini --strategy detection_10cls
-python scripts/run_perception_eval.py --dataset-name nuscenes_mini --strategy l2_planning
-
-# Temporary CLI overrides (without editing YAML)
-python scripts/run_perception_eval.py \
-    --dataset-path /mnt/data/custom_nuscenes \
-    --version v1.0 \
-    --strategy detection_10cls \
-    --scenes first \
-    --max-frames 50 \
-    --metrics standard \
-    --run-name my_run
-
-# Scene selection supports: first | half | full | explicit list
-python scripts/run_perception_eval.py --scenes scene-0061,scene-0103 --max-frames 5
+python scripts/adeval.py eval --run-name first_run
 ```
 
-Detection and tracking are evaluated together and written to `outputs/perception/<run-name>/`.
+Outputs will be in:
 
-`--max-frames` is applied per selected scene (`full` means no frame cap).
-
-### Metrics Levels (`--metrics`)
-
-`--metrics` controls the trade-off between runtime and analysis depth.
-
-| Level | Tracking IDF1 | Top-N Visualization | Typical Use |
-|------|----------------|---------------------|-------------|
-| `basic` | Disabled | Disabled | Fast smoke checks / CI sanity runs |
-| `standard` | Disabled | Disabled | Default day-to-day benchmarking (fast) |
-| `full` | Enabled | Enabled | Final reporting / deep diagnosis |
-
-Notes:
-- `standard` intentionally skips IDF1-related global assignment to reduce runtime.
-- `full` keeps the complete tracking and visualization workflow.
-
-### Prediction
-
-```bash
-python scripts/run_prediction_eval.py
+```text
+outputs/perception/first_run/
+    report.json
+    report.md
+    topn/
+    failure_mining/
 ```
 
-### Planning
+## Current Scope Status
 
-```bash
-python scripts/run_planning_eval.py
-```
+- implemented and production-ready: perception eval, mining, visualization, simulation export/validation/smoke
+- scaffold-level (placeholder): dedicated prediction/planning/e2e CLI scripts
 
-### End-to-End
+## Key Folders
 
-```bash
-python scripts/run_e2e_eval.py
-```
-
----
-
-## Eval Strategies
-
-Strategies are defined in `configs/eval.yaml` and select a category schema plus default eval parameters.
-
-| Strategy | Classes | IoU Threshold | Matcher | Description |
-|----------|---------|---------------|---------|-------------|
-| `raw` | 23 (all nuScenes) | 0.5 | greedy | No remapping; full original taxonomy |
-| `detection_10cls` *(default)* | 10 | 0.5 | greedy | Standard nuScenes detection benchmark |
-| `l2_planning` | 4 | 0.3 | hungarian | Coarse semantic grouping for planning queries |
-
-The **detection_10cls** schema maps nuScenes sub-categories (e.g. `vehicle.car`, `human.pedestrian.adult`) to 10 canonical classes. The **l2_planning** schema coarsens everything into `vehicle / pedestrian / cyclist / object`.
-
----
-
-## BEV IoU Modes
-
-The `--bev-iou-mode` flag (or `bev_iou_mode` in `eval.yaml`) selects the Bird's Eye View IoU computation method:
-
-| Mode | Speed | Yaw-aware | Notes |
-|------|-------|-----------|-------|
-| `aabb` *(default)* | Fast | No | Axis-aligned bounding boxes; NumPy-vectorized |
-| `polygon` | Slower | Yes | Rotated polygon IoU via Shapely |
-
-`aabb` is the default and sufficient for most benchmarks. Use `polygon` when yaw accuracy matters.
-
----
-
-## Metrics Reference
-
-### Perception — Detection
-
-| Metric | Description |
-|--------|-------------|
-| Precision / Recall / F1 | TP/FP/FN-based per-frame detection quality |
-| AP | Area under the 11-point interpolated PR curve |
-| mAP | Mean AP across all object classes |
-| FP Breakdown | False positives by cause: localization, background, class confusion |
-| Distance Buckets | Near / Medium / Far performance split |
-| Occlusion Buckets | Performance by annotation visibility level |
-
-### Perception — Tracking (MOT)
-
-$$\text{MOTA} = 1 - \frac{\sum_t(\text{FN}_t + \text{FP}_t + \text{IDSW}_t)}{\sum_t \text{GT}_t}$$
-
-$$\text{MOTP} = \frac{\sum_{i,t} d_{i,t}}{\sum_t c_t}$$
-
-Also reported: IDF1, ID Switch (IDSW), Mostly Tracked (MT ≥ 80%), Mostly Lost (ML ≤ 20%).
-
-### Prediction — Trajectory
-
-$$\text{ADE} = \frac{1}{T}\sum_{t=1}^{T}\sqrt{(\hat{x}_t - x_t)^2 + (\hat{y}_t - y_t)^2}$$
-
-$$\text{FDE} = \sqrt{(\hat{x}_T - x_T)^2 + (\hat{y}_T - y_T)^2}$$
-
-Also supported: minADE, minFDE (best-of-K multimodal prediction), Miss Rate.
-
-### Planning / End-to-End
-
-| Metric | Description |
-|--------|-------------|
-| Collision Rate | Fraction of timesteps with obstacle proximity below threshold |
-| Lane Violation | Fraction of timesteps with lateral offset beyond lane half-width |
-| Jerk | Peak $\|\Delta a / \Delta t\|$; comfort threshold ~3 m/s³ |
-| Route Completion | Whether ego reaches the goal within distance tolerance |
-
----
-
-## Notebooks
-
-| Notebook | Location | Content |
-|----------|----------|---------|
-| Metrics Introduction | `Metrics_Introduction.ipynb` | Full walkthrough of all AD evaluation metrics |
-| Perception Metrics | `notebooks/Perception_Metrics.ipynb` | Detection PR curves, mAP, FP breakdown |
-| Tracking Metrics | `notebooks/Tracking_Metrics.ipynb` | MOTA, MOTP, IDF1 deep-dive |
-| Prediction Metrics | `notebooks/Prediction_Metrics.ipynb` | ADE, FDE, Miss Rate visualizations |
-
----
-
-## Repository Structure
-
-```
-ad-eval-suite/
-├── Metrics_Introduction.ipynb      # Top-level metrics reference notebook
-├── requirements.txt
-├── configs/
-│   ├── dataset.yaml                # nuScenes data root, version, category schemas
-│   └── eval.yaml                   # Strategies, IoU thresholds, matcher defaults
-├── data/
-│   └── nuscenes-mini/              # nuScenes mini split (maps, samples, v1.0-mini)
-├── datasets/
-│   ├── base_dataset.py             # Abstract dataset interface
-│   └── nuscenes_loader.py          # nuScenes-devkit loader
-├── eval/
-│   ├── perception/
-│   │   ├── _common.py             # Shared matcher/scenario helper functions
-│   │   ├── bucket_metrics.py      # Distance/occlusion bucket and FP breakdown helpers
-│   │   ├── detection_eval.py       # Frame-wise detection eval (mAP, PR, FP breakdown)
-│   │   ├── tracking_eval.py        # Sequence-wise MOT eval (MOTA, MOTP, IDF1)
-│   ├── prediction/
-│   │   ├── prediction_eval.py      # Trajectory prediction evaluation
-│   │   └── trajectory_metrics.py
-│   ├── planning/
-│   │   ├── planning_eval.py        # Planning evaluation runner
-│   │   └── planning_metrics.py     # Jerk, TTC, route completion
-│   └── end_to_end/
-│       └── e2e_eval.py             # Open/closed-loop E2E evaluation
-├── generators/                     # Synthetic data generators (for testing)
-│   ├── detection_generator.py
-│   ├── tracking_generator.py
-│   ├── trajectory_generator.py
-│   └── e2e_generator.py
-├── matching/
-│   ├── iou_matching.py             # BEV IoU (AABB vectorized + polygon via Shapely)
-│   ├── greedy_match.py             # Greedy class-aware GT↔pred assignment
-│   └── hungarian.py                # Optimal class-aware assignment (linear_sum_assignment)
-├── metrics/
-│   ├── precision_recall.py         # Precision, Recall, F1, TP/FP/FN aggregation
-│   ├── ap_map.py                   # AP (PR-curve AUC) and mAP
-│   ├── tracking_metrics.py         # MOTA, MOTP, IDSW, MT, ML (via motmetrics)
-│   └── trajectory_metrics.py       # ADE, FDE, minADE, minFDE, Miss Rate
-├── notebooks/
-│   ├── Perception_Metrics.ipynb
-│   ├── Prediction_Metrics.ipynb
-│   └── Tracking_Metrics.ipynb
-├── scripts/
-│   ├── run_perception_eval.py      # CLI: detection + tracking
-│   ├── run_prediction_eval.py      # CLI: ADE/FDE
-│   ├── run_planning_eval.py        # CLI: planning metrics
-│   └── run_e2e_eval.py             # CLI: end-to-end
-└── utils/
-    ├── category_remap.py           # Category schema remapping
-    ├── distance_bucket.py          # Near / Medium / Far bucketing
-    ├── geometry.py                 # BEV projection, coordinate transforms
-    ├── iou.py                      # 2D axis-aligned IoU utilities
-    └── visualization.py            # BEV plots, PR curves, trajectory overlays
-```
-
----
-
-## Dependencies
-
-| Package | Purpose |
-|---------|---------|
-| `numpy`, `pandas`, `scipy` | Numerical computation and matching |
-| `matplotlib`, `seaborn` | Visualization |
-| `opencv-python-headless`, `shapely` | Image processing and polygon geometry |
-| `nuscenes-devkit` | nuScenes dataset API |
-| `motmetrics` | MOT metrics (MOTA / MOTP / IDF1) |
-| `PyYAML`, `tqdm`, `jupyter`, `gdown` | Configuration, progress, notebooks, data download |
-
-```bash
-pip install -r requirements.txt
+```text
+configs/         dataset/eval/sim yaml
+datasets/        dataset loaders
+eval/            metric evaluators
+mining/          failure mining and ranking
+simulation/      xosc export + validation
+visualization/   replay and map overlay
+scripts/         adeval CLI and legacy wrappers
+tests/           unit + regression tests
 ```

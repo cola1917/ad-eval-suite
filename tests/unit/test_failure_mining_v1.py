@@ -3,8 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from failure_mining.pipeline import FailureMiningConfig, run_failure_mining
-from failure_mining.rank_frames import FailureScoreWeights
+from mining.pipeline import FailureMiningConfig, run_failure_mining
+from mining.rank_frames import FailureScoreWeights
 
 
 def _gt(track_id: str, category: str, x: float, y: float) -> dict:

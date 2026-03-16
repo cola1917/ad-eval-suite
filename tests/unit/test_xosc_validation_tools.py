@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from simulator_export.validation import discover_xosc_files, validate_xosc_file
+from simulation.validation import discover_xosc_files, validate_xosc_file
 
 
 def _write_minimal_xosc(path: Path, *, non_monotonic: bool = False, bad_root: bool = False) -> None:
