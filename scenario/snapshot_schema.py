@@ -143,10 +143,12 @@ def serialize_scene_snapshots(snapshots: Sequence[Dict[str, Any]]) -> Dict[str, 
 			"frames": [],
 		}
 
+	first_meta = snapshots[0].get("meta", {})
 	return {
 		"schema_version": SCENARIO_SNAPSHOT_SCHEMA_VERSION,
 		"coordinate_system": snapshots[0].get("coordinate_system", "nuscenes_global"),
 		"scene_id": snapshots[0].get("scene_id", "unknown_scene"),
+		"location": str(first_meta.get("location", "")),
 		"num_frames": len(snapshots),
 		"frames": list(snapshots),
 	}
