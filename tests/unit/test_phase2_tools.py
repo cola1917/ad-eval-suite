@@ -7,6 +7,7 @@ import xml.etree.ElementTree as ET
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from PIL import Image
 
 from scenario.map_overlay import draw_map_overlay, load_map_geometry, query_map_patch
 from simulator_export.export_openscenario import export_snapshot_to_xosc
@@ -83,11 +84,22 @@ def test_replay_match_sets_and_loader(tmp_path: Path) -> None:
 def test_export_scene_frames_writes_images(tmp_path: Path) -> None:
 	payload = _snapshot_payload()
 	output_dir = tmp_path / "replay"
-	written = export_scene_frames(snapshot_payload=payload, output_dir=str(output_dir), show_trajectories=True)
+	written = export_scene_frames(
+		snapshot_payload=payload,
+		output_dir=str(output_dir),
+		show_trajectories=True,
+		view_mode="ego_fixed",
+		view_half_extent=50.0,
+		dpi=150,
+	)
 
 	assert len(written) == 2
 	for path in written:
 		assert Path(path).exists()
+
+	# Exported frame pixel size should remain consistent across frames.
+	with Image.open(written[0]) as img0, Image.open(written[1]) as img1:
+		assert img0.size == img1.size
 
 
 def test_export_scene_gif_writes_animation(tmp_path: Path) -> None:

@@ -100,6 +100,9 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 	parser.add_argument("--export-replay-gif", action="store_true", help="Export animated replay GIF for each failure-mined scene")
 	parser.add_argument("--replay-gif-fps", type=int, default=3, help="Replay GIF frame rate (frames per second)")
 	parser.add_argument("--replay-show-trajectories", action="store_true", help="Overlay trajectories in exported replay images")
+	parser.add_argument("--replay-view-mode", choices=["auto", "ego_fixed"], default="auto", help="Replay viewport mode: auto bounds or fixed ego-centric window")
+	parser.add_argument("--replay-view-half-extent", type=float, default=60.0, help="Half extent (m) for ego_fixed replay view mode")
+	parser.add_argument("--replay-dpi", type=int, default=150, help="Replay PNG/GIF output DPI")
 	parser.add_argument("--overlay-map", action="store_true", help="Overlay lane lines and drivable area on replay outputs (requires nuScenes map expansion JSONs)")
 	parser.add_argument("--map-data-root", default="data/nuscenes-mini", help="nuScenes data root used for map overlay (must contain maps/expansion/)")
 	parser.add_argument("--export-xosc", action="store_true", help="Export OpenSCENARIO files for failure-mined snapshots")
@@ -145,6 +148,9 @@ def _export_failure_mining_artifacts(
 	export_replay_gif: bool,
 	replay_gif_fps: int,
 	replay_show_trajectories: bool,
+	replay_view_mode: str,
+	replay_view_half_extent: float,
+	replay_dpi: int,
 	overlay_map: bool,
 	map_data_root: str,
 	export_xosc: bool,
@@ -165,6 +171,10 @@ def _export_failure_mining_artifacts(
 				output_dir=str(replay_dir),
 				show_trajectories=replay_show_trajectories,
 				map_data_root=map_root,
+				view_mode=replay_view_mode,
+				view_half_extent=float(replay_view_half_extent),
+				dpi=max(1, int(replay_dpi)),
+				show_progress=True,
 			)
 			replay_outputs.append({"scene_id": scene_id, "image_files": images})
 		if export_replay_gif:
@@ -175,6 +185,10 @@ def _export_failure_mining_artifacts(
 				show_trajectories=replay_show_trajectories,
 				fps=max(1, int(replay_gif_fps)),
 				map_data_root=map_root,
+				view_mode=replay_view_mode,
+				view_half_extent=float(replay_view_half_extent),
+				dpi=max(1, int(replay_dpi)),
+				show_progress=True,
 			)
 			replay_gif_outputs.append({"scene_id": scene_id, "gif_file": gif_path})
 		if export_xosc:
@@ -612,6 +626,9 @@ def main() -> int:
 		export_replay_gif=bool(args.export_replay_gif),
 		replay_gif_fps=max(1, int(args.replay_gif_fps)),
 		replay_show_trajectories=bool(args.replay_show_trajectories),
+		replay_view_mode=str(args.replay_view_mode),
+		replay_view_half_extent=float(args.replay_view_half_extent),
+		replay_dpi=max(1, int(args.replay_dpi)),
 		overlay_map=bool(args.overlay_map),
 		map_data_root=str(args.map_data_root),
 		export_xosc=bool(args.export_xosc),

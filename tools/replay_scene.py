@@ -14,6 +14,7 @@ if os.environ.get("DISPLAY", "") == "":  # pragma: no cover
 
 import matplotlib.pyplot as plt
 from matplotlib import animation
+from tqdm.auto import tqdm
 
 try:
 	from scenario.map_overlay import draw_map_overlay, load_map_geometry, query_map_patch
@@ -109,6 +110,8 @@ def render_frame(
 	gt_trajectories: Dict[str, List[Tuple[float, float]]],
 	pred_trajectories: Dict[str, List[Tuple[float, float]]],
 	map_context: Dict[str, Any] | None = None,
+	view_mode: str = "auto",
+	view_half_extent: float = 60.0,
 ) -> None:
 	ax.clear()
 	# Dark background so map layer contrast is better.
@@ -122,7 +125,7 @@ def render_frame(
 	if map_context is not None:
 		ego_pose = frame.get("ego", {}).get("pose", [0.0, 0.0, 0.0])
 		cx, cy = float(ego_pose[0]), float(ego_pose[1])
-		patch = query_map_patch(map_context, cx=cx, cy=cy, half_extent=60.0)
+		patch = query_map_patch(map_context, cx=cx, cy=cy, half_extent=max(view_half_extent, 1.0))
 		draw_map_overlay(ax, patch)
 
 	match_sets = _match_sets(frame)
@@ -162,9 +165,14 @@ def render_frame(
 	)
 	ax.set_title(title)
 
-	(xlim, ylim) = _axis_limits(frame)
-	ax.set_xlim(*xlim)
-	ax.set_ylim(*ylim)
+	if view_mode == "ego_fixed":
+		half_extent = max(float(view_half_extent), 1.0)
+		ax.set_xlim(float(ego_pose[0]) - half_extent, float(ego_pose[0]) + half_extent)
+		ax.set_ylim(float(ego_pose[1]) - half_extent, float(ego_pose[1]) + half_extent)
+	else:
+		(xlim, ylim) = _axis_limits(frame)
+		ax.set_xlim(*xlim)
+		ax.set_ylim(*ylim)
 
 
 def _load_scene(path: Path) -> Dict[str, Any]:
@@ -176,10 +184,10 @@ def _load_scene(path: Path) -> Dict[str, Any]:
 	return payload
 
 
-def _save_frame_image(fig: Any, out_dir: Path, frame: Dict[str, Any]) -> None:
+def _save_frame_image(fig: Any, out_dir: Path, frame: Dict[str, Any], dpi: int = 150) -> None:
 	out_dir.mkdir(parents=True, exist_ok=True)
 	filename = f"frame_{int(frame.get('frame_index', 0)):04d}.png"
-	fig.savefig(out_dir / filename, dpi=150)
+	fig.savefig(out_dir / filename, dpi=max(int(dpi), 1))
 
 
 def _load_map_for_payload(
@@ -202,6 +210,10 @@ def export_scene_frames(
 	show_trajectories: bool = False,
 	frame_indices: Sequence[int] | None = None,
 	map_data_root: str | None = None,
+	view_mode: str = "auto",
+	view_half_extent: float = 60.0,
+	dpi: int = 150,
+	show_progress: bool = False,
 ) -> List[str]:
 	frames = sorted(snapshot_payload.get("frames", []), key=lambda frame: int(frame.get("frame_index", 0)))
 	if not frames:
@@ -218,7 +230,10 @@ def export_scene_frames(
 	fig, ax = plt.subplots(figsize=(9, 9))
 	out_dir = Path(output_dir)
 	written_files: List[str] = []
-	for frame in selected:
+	frame_iter: Iterable[Dict[str, Any]] = selected
+	if show_progress and len(selected) > 1:
+		frame_iter = tqdm(selected, desc="replay frames", unit="frame")
+	for frame in frame_iter:
 		render_frame(
 			ax=ax,
 			frame=frame,
@@ -226,8 +241,10 @@ def export_scene_frames(
 			gt_trajectories=gt_trajectories,
 			pred_trajectories=pred_trajectories,
 			map_context=map_context,
+			view_mode=view_mode,
+			view_half_extent=view_half_extent,
 		)
-		_save_frame_image(fig, out_dir, frame)
+		_save_frame_image(fig, out_dir, frame, dpi=dpi)
 		written_files.append(str(out_dir / f"frame_{int(frame.get('frame_index', 0)):04d}.png"))
 	plt.close(fig)
 	return written_files
@@ -240,6 +257,10 @@ def export_scene_gif(
 	show_trajectories: bool = False,
 	fps: int = 3,
 	map_data_root: str | None = None,
+	view_mode: str = "auto",
+	view_half_extent: float = 60.0,
+	dpi: int = 150,
+	show_progress: bool = False,
 ) -> str:
 	"""Export a scene snapshot payload as an animated GIF file."""
 	frames = sorted(snapshot_payload.get("frames", []), key=lambda frame: int(frame.get("frame_index", 0)))
@@ -250,8 +271,13 @@ def export_scene_gif(
 	gt_trajectories = _collect_trajectories(frames, "gt_agents")
 	pred_trajectories = _collect_trajectories(frames, "pred_agents")
 	fig, ax = plt.subplots(figsize=(9, 9))
+	pbar = tqdm(total=len(frames), desc="replay gif", unit="frame") if show_progress and len(frames) > 1 else None
+	seen_idx: set[int] = set()
 
 	def _update(idx: int) -> None:
+		if pbar is not None and idx not in seen_idx:
+			seen_idx.add(idx)
+			pbar.update(1)
 		render_frame(
 			ax=ax,
 			frame=frames[idx],
@@ -259,6 +285,8 @@ def export_scene_gif(
 			gt_trajectories=gt_trajectories,
 			pred_trajectories=pred_trajectories,
 			map_context=map_context,
+			view_mode=view_mode,
+			view_half_extent=view_half_extent,
 		)
 
 	ani = animation.FuncAnimation(
@@ -271,7 +299,13 @@ def export_scene_gif(
 
 	output_path = Path(output_file)
 	output_path.parent.mkdir(parents=True, exist_ok=True)
-	ani.save(str(output_path), writer=animation.PillowWriter(fps=max(fps, 1)))
+	ani.save(
+		str(output_path),
+		writer=animation.PillowWriter(fps=max(fps, 1)),
+		dpi=max(int(dpi), 1),
+	)
+	if pbar is not None:
+		pbar.close()
 	plt.close(fig)
 	return str(output_path)
 
@@ -285,7 +319,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 	parser.add_argument("--save-dir", default=None, help="Directory to save rendered frame images")
 	parser.add_argument("--save-gif", default=None, help="Path to save an animated GIF")
 	parser.add_argument("--gif-fps", type=int, default=3, help="Animated GIF frame rate")
+	parser.add_argument("--dpi", type=int, default=150, help="Saved image/GIF DPI")
 	parser.add_argument("--map-data-root", default=None, help="nuScenes data root for lane/map overlay (e.g. data/nuscenes-mini)")
+	parser.add_argument("--view-mode", choices=["auto", "ego_fixed"], default="auto", help="View mode: auto bounds or fixed ego-centric window")
+	parser.add_argument("--view-half-extent", type=float, default=60.0, help="Half extent (m) for ego_fixed view mode")
 	parser.add_argument("--show-trajectories", action="store_true", help="Overlay GT and prediction trajectories")
 	parser.add_argument("--no-show", action="store_true", help="Do not open an interactive window")
 	return parser
@@ -296,6 +333,7 @@ def main() -> int:
 	scene_path = Path(args.scene_file)
 	payload = _load_scene(scene_path)
 	frames = sorted(payload.get("frames", []), key=lambda frame: int(frame.get("frame_index", 0)))
+	map_context = _load_map_for_payload(payload, args.map_data_root)
 
 	gt_trajectories = _collect_trajectories(frames, "gt_agents")
 	pred_trajectories = _collect_trajectories(frames, "pred_agents")
@@ -312,9 +350,12 @@ def main() -> int:
 			show_trajectories=args.show_trajectories,
 			gt_trajectories=gt_trajectories,
 			pred_trajectories=pred_trajectories,
+			map_context=map_context,
+			view_mode=args.view_mode,
+			view_half_extent=args.view_half_extent,
 		)
 		if args.save_dir:
-			_save_frame_image(fig, Path(args.save_dir), candidates[0])
+			_save_frame_image(fig, Path(args.save_dir), candidates[0], dpi=args.dpi)
 	elif args.animate:
 		for frame in frames:
 			render_frame(
@@ -323,9 +364,12 @@ def main() -> int:
 				show_trajectories=args.show_trajectories,
 				gt_trajectories=gt_trajectories,
 				pred_trajectories=pred_trajectories,
+				map_context=map_context,
+				view_mode=args.view_mode,
+				view_half_extent=args.view_half_extent,
 			)
 			if args.save_dir:
-				_save_frame_image(fig, Path(args.save_dir), frame)
+				_save_frame_image(fig, Path(args.save_dir), frame, dpi=args.dpi)
 			if not args.no_show:
 				plt.pause(max(args.interval_ms, 1) / 1000.0)
 	else:
@@ -335,9 +379,12 @@ def main() -> int:
 			show_trajectories=args.show_trajectories,
 			gt_trajectories=gt_trajectories,
 			pred_trajectories=pred_trajectories,
+			map_context=map_context,
+			view_mode=args.view_mode,
+			view_half_extent=args.view_half_extent,
 		)
 		if args.save_dir:
-			_save_frame_image(fig, Path(args.save_dir), frames[0])
+			_save_frame_image(fig, Path(args.save_dir), frames[0], dpi=args.dpi)
 
 	if args.save_gif:
 		export_scene_gif(
@@ -346,6 +393,10 @@ def main() -> int:
 			show_trajectories=args.show_trajectories,
 			fps=args.gif_fps,
 			map_data_root=args.map_data_root,
+			view_mode=args.view_mode,
+			view_half_extent=args.view_half_extent,
+			dpi=args.dpi,
+			show_progress=True,
 		)
 
 	if not args.no_show:
