@@ -62,3 +62,6 @@ coverage.xml
 *.hdf5
 data/*
 outputs/*
+
+.tmp
+.tmp/*
