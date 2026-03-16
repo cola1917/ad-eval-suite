@@ -64,10 +64,11 @@ def run_failure_mining(
 		record_index = int(row.get("record_index", 0)) - 1
 		if record_index < 0 or record_index >= len(frame_records):
 			continue
+		fr = frame_records[record_index]
 		snapshot = build_frame_snapshot(
 			scene_id=scene_id,
 			frame_index=int(row.get("frame_index", 0)),
-			frame_record=frame_records[record_index],
+			frame_record=fr,
 			prediction_record=prediction_records[record_index],
 			frame_summary={
 				"tp": row["tp"],
@@ -83,6 +84,7 @@ def run_failure_mining(
 			meta={
 				"failure_score": row["failure_score"],
 				"idf_switches": row["idf_switches"],
+				"location": str(fr.get("location", "")),
 			},
 		)
 		snapshots_by_scene.setdefault(scene_id, []).append(snapshot)
